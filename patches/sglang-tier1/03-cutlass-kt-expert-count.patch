@@ -1,0 +1,40 @@
+From 67951838a63d544e68f066bdb60366a67ba7672d Mon Sep 17 00:00:00 2001
+From: 05yuki <ceu.azul.samu@gmail.com>
+Date: Mon, 19 Oct 2026 16:44:34 +0900
+Subject: [PATCH] cutlass-kt-expert-count: CUTLASS MXFP4 MoE takes its expert
+ count from the weights under kt
+
+A fix in the FlashInfer CUTLASS MXFP4 MoE method: the expert count is
+taken from the weight tensor (`layer.w13_weight.shape[0]`) instead of
+`layer.num_local_experts`, because under the kt-kernel wrapper the
+method holds only the GPU-resident experts.
+
+Numerics: No switch. Identical without KTransformers (both counts
+agree); under KTransformers the CUTLASS MXFP4 path used to fail.
+
+Prerequisites: none; applies alone on tier 0.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C2UBZdnrDZSBh8yQz8rc9g
+---
+ .../layers/quantization/mxfp4_flashinfer_cutlass_moe.py    | 7 ++++++-
+ 1 file changed, 6 insertions(+), 1 deletion(-)
+
+diff --git a/python/sglang/srt/layers/quantization/mxfp4_flashinfer_cutlass_moe.py b/python/sglang/srt/layers/quantization/mxfp4_flashinfer_cutlass_moe.py
+index 7a1c5a9512..fa4a4b7e11 100644
+--- a/python/sglang/srt/layers/quantization/mxfp4_flashinfer_cutlass_moe.py
++++ b/python/sglang/srt/layers/quantization/mxfp4_flashinfer_cutlass_moe.py
+@@ -92,7 +92,12 @@ class Mxfp4FlashinferCutlassMoEMethod:
+         if moe_runner_config.layer is None:
+             moe_runner_config.layer = layer
+ 
+-        E = layer.num_local_experts
++        # Under the kt-kernel wrapper this method holds only the GPU-resident
++        # experts, while layer.num_local_experts still counts every routed
++        # expert, so the per-expert tensors below have to be sized from the
++        # weights that actually exist or FlashInfer rejects them
++        # (swiglu_limit must have num_experts_on_rank elements: 384 vs 7).
++        E = layer.w13_weight.shape[0]
+         device = layer.w13_weight.device
+         if self._use_mxfp8_act_scaling:
+             # FlashInfer's MXFP4 ABI requires a neutral per-expert global scale.

@@ -1,0 +1,8 @@
+/third_party/
+/.venv/
+/build/
+/state/
+/logs/
+engram-adapter/librow_store.so
+__pycache__/
+/.cache/

@@ -1,0 +1,288 @@
+From d5b5dba3ddec66a955b67454bcffe0a762a839ad Mon Sep 17 00:00:00 2001
+From: 05yuki <ceu.azul.samu@gmail.com>
+Date: Mon, 19 Oct 2026 22:56:28 +0900
+Subject: [PATCH] fp8-decode: block-FP8 GEMV and split-K for decode-sized dense
+ GEMMs
+
+Faster block-FP8 dense GEMMs for decode-sized inputs. With up to four
+rows, `w8a8_block_fp8_matmul_triton` runs a Triton GEMV
+(`fp8_block_gemv.py`) that steps K over several scale groups at a time.
+With up to 16 rows and no tuned config for the shape, the Triton matmul
+uses a split-K tiling.
+
+Numerics: Not bit-identical when on: the same FP8 operands summed in a
+different fp32 order (GEMV, split-K). Prefill shapes are unchanged.
+
+Prerequisites: none.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01C2UBZdnrDZSBh8yQz8rc9g
+---
+ python/sglang/kernels/ops/gemm/fp8_kernel.py  |  51 +++++-
+ .../ops/quantization/fp8_block_gemv.py        | 172 ++++++++++++++++++
+ 2 files changed, 222 insertions(+), 1 deletion(-)
+ create mode 100644 python/sglang/kernels/ops/quantization/fp8_block_gemv.py
+
+diff --git a/python/sglang/kernels/ops/gemm/fp8_kernel.py b/python/sglang/kernels/ops/gemm/fp8_kernel.py
+index 2e7bdd7aaa..1061338ebc 100644
+--- a/python/sglang/kernels/ops/gemm/fp8_kernel.py
++++ b/python/sglang/kernels/ops/gemm/fp8_kernel.py
+@@ -23,6 +23,7 @@ from sglang.srt.utils.custom_op import register_custom_op
+ _is_cuda = is_cuda()
+ _is_hip = is_hip()
+ _is_gfx1250 = is_gfx1250_supported()
++_FP8_GEMV = os.environ.get("SGLANG_FP8_GEMV", "1") == "1"
+ logger = logging.getLogger(__name__)
+ 
+ 
+@@ -773,6 +774,9 @@ def w8a8_mxfp8_matmul_deepgemm(
+     return C
+ 
+ 
++_skinny_seen = set()
++
++
+ def w8a8_block_fp8_matmul_triton(
+     A: torch.Tensor,
+     B: torch.Tensor,
+@@ -802,6 +806,21 @@ def w8a8_block_fp8_matmul_triton(
+ 
+     block_n, block_k = block_size
+ 
++    # Decode-sized calls step K by several scale groups (the block kernel steps
++    # by one, 32 on V4.1-1017); SGLANG_FP8_GEMV=0 turns it off.
++    if (
++        M <= 4
++        and _FP8_GEMV
++        and not _is_hip
++        and not _is_gfx1250
++        and As.dtype == torch.float
++        and Bs.dtype == torch.float
++    ):
++        from sglang.kernels.ops.quantization.fp8_block_gemv import fp8_block_gemv
++
++        fp8_block_gemv(A.view(M, K), B, As.reshape(M, -1), Bs, block_size, C.view(M, N))
++        return C
++
+     configs = get_w8a8_block_fp8_configs(N, K, block_size[0], block_size[1])
+     if configs:
+         # If an optimal configuration map has been found, look up the
+@@ -819,9 +838,39 @@ def w8a8_block_fp8_matmul_triton(
+             "num_stages": 3,
+         }
+ 
++    # Skinny GEMMs (decode: M is the batch, 1 here) with the default tiling
++    # launch only N/128 CTAs, each streaming a K x 128 strip alone: on the
++    # RTX 5070 Ti (no tuned config) that is 250-500 GB/s against ~900. For
++    # M <= 16 use the split-K kernel with a 16-row tile: measured 3-6x faster
++    # on N=2048..7168 and ~1.2x on N=16384+. SGLANG_FP8_SKINNY=0 turns it off;
++    # SGLANG_FP8_SKINNY_SPLIT_K / _BLOCK_N override the tile.
++    skinny = (
++        not configs
++        and M <= 16
++        and not _is_hip
++        and not _is_gfx1250
++        and os.environ.get("SGLANG_FP8_SKINNY", "1") == "1"
++    )
++    if skinny:
++        config = {
++            "BLOCK_SIZE_M": 16,
++            "BLOCK_SIZE_N": int(os.environ.get("SGLANG_FP8_SKINNY_BLOCK_N", "128")),
++            "BLOCK_SIZE_K": block_size[1],
++            "GROUP_SIZE_M": 1,
++            "num_warps": 4,
++            "num_stages": 3,
++            "SWAP_AB": False,
++            "SPLIT_K": int(os.environ.get("SGLANG_FP8_SKINNY_SPLIT_K", "4")),
++        }
++        if os.environ.get("SGLANG_FP8_SKINNY_LOG") == "1":
++            key = (M, N, K)
++            if key not in _skinny_seen:
++                _skinny_seen.add(key)
++                logger.info("fp8 skinny gemm shape M=%d N=%d K=%d", M, N, K)
++
+     # Split-K accumulates K in SPLIT_K separate fp32 partials, so its results
+     # do not match the single-accumulator kernels bit-for-bit.
+-    hopper_tuned = get_platform().is_sm90 and (
++    hopper_tuned = (get_platform().is_sm90 or skinny) and (
+         config.get("SWAP_AB", False) or config.get("SPLIT_K", 1) > 1
+     )
+     if hopper_tuned:
+diff --git a/python/sglang/kernels/ops/quantization/fp8_block_gemv.py b/python/sglang/kernels/ops/quantization/fp8_block_gemv.py
+new file mode 100644
+index 0000000000..c5559254c4
+--- /dev/null
++++ b/python/sglang/kernels/ops/quantization/fp8_block_gemv.py
+@@ -0,0 +1,172 @@
++"""Block-FP8 W8A8 GEMV for decode (M <= 4): the same arithmetic as _w8a8_block_fp8_matmul_hopper (the activation
++quantized per token group, the weight per block; each group's fp8 products summed in fp32, times the two scales,
++summed over the groups), with the K loop in steps of several groups instead of one.
++
++The block kernel steps K by the scale group (32 on DeepSeek-V4.1-Flash-1017), so a decode call loads a 32 x 128
++weight tile per iteration and ran at 2.5-3x the bandwidth bound (wq_b 59.7 us for 21 MB on an RTX 5070 Ti). Here
++a program holds BLOCK_N weight rows over BLOCK_K = several groups, sums each group with tl.sum, and splits K across
++programs when N alone gives too few of them; the split partials are summed by a second kernel in a fixed order.
++Only the fp32 summation order differs from the block kernel.
++(patches/sglang-fp8-block-gemv.py installs it; SGLANG_FP8_GEMV=0 turns it off.)"""
++
++import torch
++import triton
++import triton.language as tl
++
++
++@triton.jit
++def _fp8_block_gemv_kernel(
++    A,
++    B,
++    C,
++    As,
++    Bs,
++    M,
++    N,
++    K,
++    stride_am,
++    stride_bn,
++    stride_cs,
++    stride_cm,
++    stride_As_m,
++    stride_As_k,
++    stride_Bs_n,
++    stride_Bs_k,
++    k_per_split,
++    GROUP_N: tl.constexpr,
++    GROUP_K: tl.constexpr,
++    BLOCK_N: tl.constexpr,
++    BLOCK_K: tl.constexpr,
++    MB: tl.constexpr,
++):
++    pid_n = tl.program_id(0)
++    split = tl.program_id(1)
++    G: tl.constexpr = BLOCK_K // GROUP_K
++    offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
++    nmask = offs_n < N
++    k_start = split * k_per_split
++    k_end = tl.minimum(k_start + k_per_split, K)
++    n_groups_k = tl.cdiv(K, GROUP_K)
++    acc0 = tl.zeros([BLOCK_N], dtype=tl.float32)
++    acc1 = tl.zeros([BLOCK_N], dtype=tl.float32)
++    acc2 = tl.zeros([BLOCK_N], dtype=tl.float32)
++    acc3 = tl.zeros([BLOCK_N], dtype=tl.float32)
++    b_s_row = (offs_n // GROUP_N) * stride_Bs_n
++    for k0 in range(k_start, k_end, BLOCK_K):
++        offs_k = k0 + tl.arange(0, BLOCK_K)
++        kmask = offs_k < k_end
++        b = tl.load(
++            B + offs_n[:, None] * stride_bn + offs_k[None, :],
++            mask=nmask[:, None] & kmask[None, :],
++            other=0.0,
++        ).to(tl.float32)
++        kg = k0 // GROUP_K + tl.arange(0, G)
++        gmask = (kg < n_groups_k) & (kg * GROUP_K < k_end)
++        b_s = tl.load(
++            Bs + b_s_row[:, None] + kg[None, :] * stride_Bs_k,
++            mask=nmask[:, None] & gmask[None, :],
++            other=0.0,
++        )
++        for mi in tl.static_range(MB):
++            if mi < M:
++                a = tl.load(A + mi * stride_am + offs_k, mask=kmask, other=0.0).to(
++                    tl.float32
++                )
++                a_s = tl.load(
++                    As + mi * stride_As_m + kg * stride_As_k, mask=gmask, other=0.0
++                )
++                part = tl.sum(tl.reshape(b * a[None, :], (BLOCK_N, G, GROUP_K)), axis=2)
++                contrib = tl.sum(part * a_s[None, :] * b_s, axis=1)
++                if mi == 0:
++                    acc0 += contrib
++                elif mi == 1:
++                    acc1 += contrib
++                elif mi == 2:
++                    acc2 += contrib
++                else:
++                    acc3 += contrib
++    out = C + split * stride_cs + offs_n
++    tl.store(out, acc0.to(C.dtype.element_ty), mask=nmask)
++    if MB > 1:
++        if M > 1:
++            tl.store(out + stride_cm, acc1.to(C.dtype.element_ty), mask=nmask)
++    if MB > 2:
++        if M > 2:
++            tl.store(out + 2 * stride_cm, acc2.to(C.dtype.element_ty), mask=nmask)
++    if MB > 3:
++        if M > 3:
++            tl.store(out + 3 * stride_cm, acc3.to(C.dtype.element_ty), mask=nmask)
++
++
++@triton.jit
++def _fp8_block_gemv_reduce(P, C, MN, SPLITS: tl.constexpr, BLOCK: tl.constexpr):
++    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
++    mask = offs < MN
++    acc = tl.zeros([BLOCK], dtype=tl.float32)
++    for s in tl.static_range(SPLITS):
++        acc += tl.load(P + s * MN + offs, mask=mask, other=0.0)
++    tl.store(C + offs, acc.to(C.dtype.element_ty), mask=mask)
++
++
++MAX_M = 4
++_SMS = {}
++
++
++def _sms(dev) -> int:
++    i = dev.index if dev.index is not None else torch.cuda.current_device()
++    if i not in _SMS:
++        _SMS[i] = torch.cuda.get_device_properties(i).multi_processor_count
++    return _SMS[i]
++
++
++def fp8_block_gemv(A, B, As, Bs, block_size, C, block_n=16, block_k=512):
++    """A [M, K] e4m3 (M <= 4), B [N, K] e4m3, As [M, K/gk] fp32, Bs [N/gn, K/gk] fp32 -> C [M, N]."""
++    M, K = A.shape
++    N = B.shape[0]
++    gn, gk = block_size
++    block_k = max(gk, min(block_k, triton.next_power_of_2(K)))
++    assert block_k % gk == 0 and M <= MAX_M
++    nb = triton.cdiv(N, block_n)
++    # enough programs for the SMs: split K when N alone gives fewer than 8 a SM
++    split = 1
++    while nb * split < 8 * _sms(A.device) and K // (split * 2) >= block_k:
++        split *= 2
++    k_per_split = triton.cdiv(triton.cdiv(K, split), block_k) * block_k
++    split = triton.cdiv(K, k_per_split)
++    mb = 1 if M == 1 else (2 if M == 2 else 4)
++    if split == 1:
++        P, stride_cs = C, 0
++    else:
++        P = torch.empty((split, M, N), device=A.device, dtype=torch.float32)
++        stride_cs = M * N
++    _fp8_block_gemv_kernel[(nb, split)](
++        A,
++        B,
++        P,
++        As,
++        Bs,
++        M,
++        N,
++        K,
++        A.stride(0),
++        B.stride(0),
++        stride_cs,
++        N,
++        As.stride(0),
++        As.stride(1),
++        Bs.stride(0),
++        Bs.stride(1),
++        k_per_split,
++        GROUP_N=gn,
++        GROUP_K=gk,
++        BLOCK_N=block_n,
++        BLOCK_K=block_k,
++        MB=mb,
++        num_warps=4,
++        num_stages=3,
++    )
++    if split > 1:
++        _fp8_block_gemv_reduce[(triton.cdiv(M * N, 512),)](
++            P, C, M * N, SPLITS=split, BLOCK=512
++        )
++    return C
