@@ -104,34 +104,38 @@ AMD EPYC 7452 (Zen 2, AVX2, one of two sockets: 32 cores, 256 GB DDR4), one RTX 
 every column from one launch, after one warm-up pass of the same prompts (the first pass fills the
 expert cache from the drive).
 
-The 64 GB column is that socket under a memory limit,
-`systemd-run --user --scope -p MemoryMax=64G -p MemorySwapMax=0 ./serve.sh`, not a 64 GB desktop:
-a desktop's memory and drive will give other numbers. `serve.sh` reads the limit and
-keeps a 46 GiB expert cache, about 37% of the experts (90% of the expert reads hit it). With the
-socket's 251 GiB the cache holds every expert and the IQ1_M decode copy (195 GiB of its 204), and
-the server process uses 220 GB.
+The 64 GB and 128 GB columns are that socket under a memory limit,
+`systemd-run --user --scope -p MemoryMax=64G -p MemorySwapMax=0 ./serve.sh` (or `128G`), not a
+desktop of that size: a desktop's memory and drive will give other numbers. `serve.sh` reads the
+limit and sizes the expert cache from it:
+
+| RAM | expert cache | of the experts' 124 GiB | expert reads that hit it |
+|---|---|---|---|
+| 64 GB | 46 GiB | 37% | 90.2% |
+| 128 GB | 110 GiB | 89% | 98.3% |
+| 251 GiB (the socket) | 195 GiB, with the IQ1_M decode copy | all | 99.1% |
 
 Decode, 1,024 tokens a reply, tok/s (`--other-text` for the rows below the first):
 
-| text | 64 GB of RAM | 251 GiB (all experts in RAM) |
-|---|---|---|
-| Japanese prose (median of four prompts) | 22.7 | 39.9 |
-| math | 18.1 | 30.3 |
-| Chinese prose | 17.4 | 31.5 |
-| JSON | 17.1 | 28.9 |
-| English prose | 16.2 | 29.2 |
-| English technical prose | 13.0 | 27.1 |
-| Python code | 12.8 | 26.7 |
+| text | 64 GB | 128 GB | 251 GiB |
+|---|---|---|---|
+| Japanese prose (median of four prompts) | 22.7 | 30.1 | 39.9 |
+| math | 18.1 | 23.8 | 30.3 |
+| Chinese prose | 17.4 | 25.5 | 31.5 |
+| JSON | 17.1 | 22.1 | 28.9 |
+| English prose | 16.2 | 22.7 | 29.2 |
+| English technical prose | 13.0 | 20.2 | 27.1 |
+| Python code | 12.8 | 21.1 | 26.7 |
 
 Prefill, one prompt of random token ids:
 
-| prompt (tokens) | 64 GB of RAM | 251 GiB |
-|---|---|---|
-| 35,000 | 913 tok/s (38 s) | 1,650 tok/s (21 s) |
+| prompt (tokens) | 64 GB | 128 GB | 251 GiB |
+|---|---|---|---|
+| 35,000 | 913 tok/s (38 s) | 1,497 tok/s (23 s) | 1,650 tok/s (21 s) |
 
-With RAM between the two, the cache holds more of the experts and fewer reads go to the drive; only
-the two ends were measured. Outside prefill the hot lend holds 15-16 more experts a layer on the
-GPU (610-640 slots with all experts in RAM, in 5 GiB the driver had free), swapped for what the text
+The misses go to the drive: at 128 GB one expert read in sixty misses and the decode is already 1.3
+to 1.6 times the 64 GB one; the rest of the way comes with the last 11% of the experts and the IQ1_M
+decode copy. Outside prefill the hot lend holds 15-16 more experts a layer on the GPU (610-640 slots with all experts in RAM, in 5 GiB the driver had free), swapped for what the text
 routes to; Japanese prose runs fastest because its routes gather on fewer experts, so the slots and
 the cache take more of them.
 
