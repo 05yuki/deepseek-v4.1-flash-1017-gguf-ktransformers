@@ -17,6 +17,11 @@ A switch marked "on" is on in `serve.sh`.
   compressor and the indexer are dequantized to bf16 at load (`modules_to_not_convert`). Decode
   multiplies the GGUF rows with vector kernels taken from llama.cpp (`kt_gguf_moe_multi/`); a prefill
   of 64 rows or more dequantizes each weight to bf16 once and runs a bf16 GEMM.
+- **Embedding**: the token embedding stays in its GGUF type (Q5_K, 434 MiB instead of a 1,262 MiB bf16
+  copy); the rows a batch looks up are opened in float32 in gguf-py's order of operations, so the
+  embeddings are the same values the bf16 copy held.
+- **RoPE tables**: built for the served context (`SGLANG_CONTEXT_LENGTH`) instead of the model's
+  1,048,576 positions (two tables of 512 MiB each at 1M; their rows depend only on the position).
 - **Routed experts**: kt-kernel's LLAMAFILE backend computes them from the GGUF's rows
   (`--kt-method LLAMAFILE`, `KT_GGUF_ZEROCOPY=1`, on): no arena copy of the experts at load.
 - **Engram**: the two tables are read row by row from the Engram GGUF (IQ4_NL, 144 bytes a row)
@@ -66,6 +71,28 @@ taking the ones the expert cache holds from RAM, and the GPU multiplies them in 
 with llama.cpp's MMQ kernels (`kt_gguf_moe_mmq/`, `KT_GGUF_STREAM_MMQ=1`, on), built for the GPU's
 arch. The lends work as in the MXFP4 recipe; the lend's copy of the dense weights is read back from
 the GGUF instead of kept in host memory (`KT_PREFILL_LEND_MIRROR=gguf`, on).
+
+## Turing (SM75)
+
+`serve.sh` lets an RTX 20 card through and sets it up as below (all of it inert on SM80 and newer):
+
+- **Attention**: SGLang's Triton sparse decode for Ada (SM89, tier 0) serves SM75 too. Triton has no
+  FP8 type and no bf16 dot below SM80, so the kernel opens the e4m3 KV bytes from their bit fields
+  (the same values as the FP8 conversion: checked for all 256 bytes) and takes its dots in float32.
+  The compressed KV's FP4 scale is rounded to e4m3 with integer ops (ties to even, as the cvt does).
+- **bf16**: SGLang switches pre-SM80 GPUs to fp16; `KT_SM75_BF16=1` and `--dtype bfloat16` keep bf16,
+  which DSV4's JIT kernels need. The MoE router's bf16 GEMM runs in float32.
+- **sgl-kernel ops**: the sgl-kernel wheel carries sm_80 and newer code only. `kt_sm75_ops.py` builds
+  its GGUF, activation, RoPE, top-k and `moe_sum` sources (in SGLang's tree) for the GPU's arch with
+  torch's JIT loader (`setup.sh` does it once) and registers them as those ops' CUDA kernels.
+- **Prefill**: the dense layers' prefill runs on MMQ in their GGUF types (`SGLANG_GGUF_DEQUANT_ROWS`,
+  `SGLANG_DSV4_WO_A_DEQUANT_ROWS`): the bf16 copy path needs a bf16 cuBLAS GEMM.
+- **Context and chunk**: a card under 12 GB defaults to 32,768 tokens. The prefill chunk is 2,048
+  tokens with no calibration launch: on SM75 the TileLang mHC kernels (`hc_split_sinkhorn`,
+  `mhc_post`) fail to launch inside the server on 8,192-token chunks (`CUDA_ERROR_INVALID_VALUE`;
+  they run at that size on their own, the cause is not found), and the CPU sets the prefill's pace.
+
+V100 (SM70) is not covered: CUDA 13 dropped it, so it would take a CUDA 12 build of the whole stack.
 
 ## Not carried over from the MXFP4 recipe
 

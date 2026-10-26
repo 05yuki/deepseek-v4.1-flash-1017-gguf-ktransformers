@@ -130,6 +130,9 @@ if [[ "$cap" == "7.5" ]]; then
   sm75_bf16=1
   export SGLANG_GGUF_DEQUANT_ROWS="${SGLANG_GGUF_DEQUANT_ROWS:-1000000000}"
   export SGLANG_DSV4_WO_A_DEQUANT_ROWS="${SGLANG_DSV4_WO_A_DEQUANT_ROWS:-1000000000}"
+  # a 2048-token prefill chunk without the calibration launch: TileLang's mHC kernels fail to
+  # launch on larger chunks there (CUDA_ERROR_INVALID_VALUE at 8192), and the CPU sets the pace
+  export SGLANG_CHUNKED_PREFILL_SIZE="${SGLANG_CHUNKED_PREFILL_SIZE:-2048}"
 fi
 # 131,072 tokens; a card under 12 GB (an 8 GB RTX 20) keeps 32,768, its room after the weights
 vram_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${gpus[0]}" | head -1)"

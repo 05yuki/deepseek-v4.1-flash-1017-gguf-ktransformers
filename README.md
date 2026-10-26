@@ -6,7 +6,7 @@ on one 16 GB GPU, one CPU socket and 64 GB of RAM, faster with more RAM. The 384
 layer run on the CPU from the GGUF's own rows through [KTransformers](https://github.com/kvcache-ai/ktransformers)'
 kt-kernel (its LLAMAFILE backend): RAM holds as many of them as it has room for, and the rest are read
 from the NVMe drive when the text routes to them, so every GiB of RAM added means fewer reads and a
-faster decode, 1.7 to 2.1 times the 64 GB speed once all of them fit. Attention and the
+faster decode, 1.6 to 2.1 times the 64 GB speed once all of them fit. Attention and the
 dense layers run on the GPU in their GGUF types through [SGLang](https://github.com/sgl-project/sglang),
 and the GPU's free memory holds as many more experts as fit, swapped for what the text routes to.
 The prefill streams the experts to the GPU and multiplies them there with llama.cpp's MMQ kernels.
@@ -35,9 +35,10 @@ The server speaks SGLang's OpenAI-compatible API on `127.0.0.1:8080`, one reques
 
 ## What it needs
 
-- **GPU: one, 16 GB, SM120 (RTX 50) as tested.** The dense layers in their GGUF types take
-  8.3 GB; the rest is the KV pool (131,072 tokens by default, `SGLANG_CONTEXT_LENGTH`) and
-  working room that the prefill chunk and the extra hot experts take. With several GPUs
+- **GPU: one, 16 GB, SM120 (RTX 50) as tested; an 8 GB RTX 20 (SM75) runs it too**
+  ([below](#an-rtx-2070-8-gb-and-a-6-core-desktop-cpu)). The dense layers in their GGUF types take
+  6.8 GB; the rest is the KV pool (131,072 tokens by default, 32,768 on a card under 12 GB;
+  `SGLANG_CONTEXT_LENGTH`) and working room that the prefill chunk and the extra hot experts take. With several GPUs
   visible, `serve.sh` takes the first (`CUDA_VISIBLE_DEVICES` picks another): the GGUF
   experts do not split across tensor-parallel ranks.
 - **CPU and RAM: the socket the GPU hangs off.** `serve.sh` runs the experts on that NUMA
@@ -57,7 +58,8 @@ The server speaks SGLang's OpenAI-compatible API on `127.0.0.1:8080`, one reques
   and the prefill streams the experts from it: with less RAM, the drive's speed sets more of
   the decode.
 - **Software.** Linux, bash 4.4 or newer, the CUDA toolkit (built and run with 13.1), git,
-  gcc/g++, the libnuma and hwloc headers (`libnuma-dev libhwloc-dev`), and `uv` or Python 3.12.
+  gcc/g++, the libnuma and hwloc headers (`libnuma-dev libhwloc-dev`), and `uv` or Python 3.12
+  with its headers (`python3.12-dev`).
   The Python packages are pinned in `requirements.txt`.
 - **Host settings**, as root: `vm.min_free_kbytes = 8388608` and swap off.
 
@@ -112,32 +114,47 @@ limit and sizes the expert cache from it:
 | RAM | expert cache | of the experts' 124 GiB | expert reads that hit it |
 |---|---|---|---|
 | 64 GB | 46 GiB | 37% | 90.2% |
-| 128 GB | 110 GiB | 89% | 98.3% |
+| 128 GB | 110 GiB | 89% | 98.2% |
 | 251 GiB (the socket) | 195 GiB, with the IQ1_M decode copy | all | 99.1% |
 
 Decode, 1,024 tokens a reply, tok/s (`--other-text` for the rows below the first):
 
 | text | 64 GB | 128 GB | 251 GiB |
 |---|---|---|---|
-| Japanese prose (median of four prompts) | 22.7 | 30.1 | 39.9 |
-| math | 18.1 | 23.8 | 30.3 |
-| Chinese prose | 17.4 | 25.5 | 31.5 |
-| JSON | 17.1 | 22.1 | 28.9 |
-| English prose | 16.2 | 22.7 | 29.2 |
-| English technical prose | 13.0 | 20.2 | 27.1 |
-| Python code | 12.8 | 21.1 | 26.7 |
+| Japanese prose (median of four prompts) | 24.2 | 33.0 | 39.2 |
+| JSON | 17.8 | 22.9 | 30.1 |
+| Chinese prose | 17.3 | 27.7 | 32.3 |
+| math | 17.3 | 23.3 | 30.3 |
+| English prose | 17.1 | 24.8 | 30.4 |
+| Python code | 13.0 | 20.9 | 27.4 |
+| English technical prose | 12.8 | 20.9 | 25.8 |
 
 Prefill, one prompt of random token ids:
 
 | prompt (tokens) | 64 GB | 128 GB | 251 GiB |
 |---|---|---|---|
-| 35,000 | 913 tok/s (38 s) | 1,497 tok/s (23 s) | 1,650 tok/s (21 s) |
+| 35,000 | 1,249 tok/s (28 s) | 1,844 tok/s (19 s) | 2,010 tok/s (17 s) |
 
-The misses go to the drive: at 128 GB one expert read in sixty misses and the decode is already 1.3
-to 1.6 times the 64 GB one; the rest of the way comes with the last 11% of the experts and the IQ1_M
-decode copy. Outside prefill the hot lend holds 15-16 more experts a layer on the GPU (610-640 slots with all experts in RAM, in 5 GiB the driver had free), swapped for what the text
-routes to; Japanese prose runs fastest because its routes gather on fewer experts, so the slots and
+The misses go to the drive: at 128 GB one expert read in fifty-five misses and the decode is already
+1.3 to 1.6 times the 64 GB one; the rest of the way comes with the last 11% of the experts and the
+IQ1_M decode copy. Outside prefill the hot lend holds 20-21 more experts a layer on the GPU (805-833
+slots with all experts in RAM, in 6.6 GiB the driver had free), swapped for what the text routes to; Japanese prose runs fastest because its routes gather on fewer experts, so the slots and
 the cache take more of them.
+
+### An RTX 2070 8 GB and a 6-core desktop CPU
+
+Intel Core i5-9600K (6 cores, AVX2, two-channel DDR4), one RTX 2070 8 GB (Turing, SM75), the pack on
+a PCIe 3 NVMe drive (NTFS), the `serve.sh` defaults for that card (32,768-token context, 2,048-token
+prefill chunk) under a 64 GB memory limit, on a desktop in use and without the host settings above.
+What Turing takes is in [docs/gguf.md](docs/gguf.md#turing-sm75).
+
+| | tok/s |
+|---|---|
+| decode, Japanese prose (the first bench prompt, 256 tokens, second pass) | 1.8 |
+| decode, English prose (256 tokens, second pass) | 1.7 |
+| prefill, 8,000 tokens | 34 |
+
+The six CPU cores set the pace (`nvidia-smi` showed the GPU 8% busy in decode).
 
 ## Accuracy
 
@@ -150,6 +167,7 @@ teacher-forced.
 |---|---|---|
 | reference (`inference/model.py`, the FP8 checkpoint) | 0.7185 | |
 | served, the IQ2_XXS GGUF | 1.0479 | +0.329 (0.054) |
+| served, the IQ2_XXS GGUF on the RTX 2070 (`KT_GPU_EXPERTS=0`) | 1.0468 | +0.328 (0.053) |
 
 The difference is the GGUF's quantization, not the serving: served with only the routed experts
 from the GGUF (the dense layers and the engram from the FP8 checkpoint) the NLL is +0.312 above the
@@ -158,6 +176,11 @@ GGUF's experts match the checkpoint's expert by expert (cosine 0.93 for IQ2_XXS 
 IQ1_M) with a relative weight error of 36% and 51%. The same serving path on the MXFP4 checkpoint
 lands within 0.001 of the reference. The texts are well known, so the NLL is low; they compare two
 runs on the same tokens, not the model's quality, which the pack's model card reports on benchmarks.
+
+On an 8 GB card the scoring needs `KT_GPU_EXPERTS=0` at launch: the logprobs of a whole piece take
+the room the resident expert holds. The dynamic hot slots move the NLL by a few thousandths between
+launches (which experts the GPU computes changes the arithmetic); with the slots fixed
+(`KT_KV_HOT_DYNAMIC_SLOTS=0`) two launches give the same bits.
 
 To repeat it (the reference needs the FP8 checkpoint and one 16 GB GPU, about 4 minutes):
 
@@ -170,12 +193,13 @@ python tools/nll.py compare ref.json served.json
 
 ## Not done
 
-- Other GPUs than SM120: the GGUF kernels build for the GPU's own arch, but only an RTX 5070 Ti
-  was run.
+- Other GPUs than SM120 and SM75: the GGUF kernels build for the GPU's own arch, but only an RTX
+  5070 Ti and an RTX 2070 were run. V100 (SM70) would take a CUDA 12 build of the stack (CUDA 13
+  has no SM70).
 - More than one GPU: not supported (the GGUF expert blocks do not split across ranks).
 - The IQ1_M and IQ2_XS builds of the pack: their types are all supported, but only IQ2_XXS was
   measured.
-- CPUs other than Zen 2.
+- CPUs other than Zen 2 and Coffee Lake (i5-9600K).
 
 ## License
 
