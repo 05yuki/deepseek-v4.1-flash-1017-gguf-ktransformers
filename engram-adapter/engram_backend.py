@@ -302,7 +302,7 @@ def install(module):
 
         count = indices.numel()
         if not count:
-            return self._empty(indices)
+            return self.new_rows(indices)
         capacity = 1 << (count - 1).bit_length()
         dev = indices.device.index
         if capacity >= EAGER_ROWS and not torch.cuda.is_current_stream_capturing():
@@ -365,7 +365,7 @@ def install(module):
         if err:
             raise RuntimeError(f"cudaLaunchHostFunc failed: {err}")
         dw[:count].copy_(w[:count], non_blocking=True)
-        out = self._empty(indices)
+        out = self.new_rows(indices)
         if self._iq4nl:
             out.view(-1, DIM).copy_(self._iq4nl_rows(dw[:count]))
             return out

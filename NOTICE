@@ -20,7 +20,7 @@ Copyright (c) 2023-2024 The ggml authors, Copyright (c) 2023-2024 The llama.cpp
 authors, Copyright (c) 2024-2025 The ik_llama.cpp authors, MIT License); the MIT
 terms apply to that code.
 
-The patches under patches/ modify sgl-project/sglang (commit 65633129) and
+The patches under patches/ modify sgl-project/sglang (commit 66f79f1a) and
 kvcache-ai/ktransformers (kt-kernel, commit 95009ea), both Apache-2.0.
 
 The GGUF weights this setup runs are ISTA-DASLab's

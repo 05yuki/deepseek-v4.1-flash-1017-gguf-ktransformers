@@ -330,7 +330,7 @@ diff -ruN a/python/sglang/srt/layers/kt_sm75_ops.py b/python/sglang/srt/layers/k
 diff -ruN a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
 --- a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
 +++ b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
-@@ -483,7 +483,19 @@
+@@ -488,7 +488,19 @@
          server_args = get_server_args()
          kt_config = create_kt_config_from_server_args(server_args, layer_id)
          if kt_config is not None:
@@ -28813,7 +28813,7 @@ diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/la
 diff -ruN a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
 --- a/python/sglang/srt/model_executor/model_runner.py
 +++ b/python/sglang/srt/model_executor/model_runner.py
-@@ -1866,6 +1866,9 @@
+@@ -1867,6 +1867,9 @@
              from sglang.srt.layers.moe import kt_lend
  
              kt_lend.before_forward(forward_batch)
@@ -28864,7 +28864,7 @@ diff -ruN a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_l
 diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
 --- a/python/sglang/srt/models/deepseek_v4.py
 +++ b/python/sglang/srt/models/deepseek_v4.py
-@@ -847,6 +847,26 @@
+@@ -872,6 +872,26 @@
  ] = {}
  
  
@@ -28891,7 +28891,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
  def _freqs_cis_to_cos_sin(
      freqs_cis: torch.Tensor, dtype: torch.dtype, device: torch.device
  ) -> Tuple[torch.Tensor, torch.Tensor]:
-@@ -886,6 +906,23 @@
+@@ -911,6 +931,23 @@
      return out
  
  
@@ -28915,7 +28915,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
  def _apply_gguf_grouped_wo_a(
      o: torch.Tensor,
      qweight: torch.Tensor,
-@@ -897,6 +934,26 @@
+@@ -922,6 +959,26 @@
          from sglang.srt.layers.quantization.gguf import fused_mul_mat_gguf
  
          matmul_fn = fused_mul_mat_gguf
@@ -28942,7 +28942,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
  
      group_outputs = []
      for group_id in range(o.shape[1]):
-@@ -1228,7 +1285,7 @@
+@@ -1255,7 +1312,7 @@
          quantize_wo_a = fp8 or self.use_npu_arch35_mxfp8_wo_a
          if wo_a_keeps_quant_config is None:
              keep_source_quant = (
@@ -28951,7 +28951,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
              )
              wo_a_quant_config: Optional[QuantizationConfig] = (
                  quant_config if quantize_wo_a or keep_source_quant else None
-@@ -1367,7 +1424,10 @@
+@@ -1394,7 +1451,10 @@
              beta_fast=scaling.get("beta_fast", 32),
              beta_slow=scaling.get("beta_slow", 1),
          )
@@ -28963,7 +28963,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
          self.register_buffer("freqs_cis", freqs_cis, persistent=False)
          self.freqs_cis: torch.Tensor
  
-@@ -1576,6 +1636,9 @@
+@@ -1603,6 +1663,9 @@
              is_neox_style=False,
              device=get_device().device,
          )
@@ -28973,7 +28973,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
  
          if _is_npu:
              rope = Dsv4NpuRoPE.for_freqs(
-@@ -3956,7 +4019,7 @@
+@@ -3983,7 +4046,7 @@
          if self.pp_group.is_first_rank:
              embedding_quant_config = (
                  quant_config
