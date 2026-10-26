@@ -1,38 +1,82 @@
 #!/usr/bin/env bash
-# Serve DeepSeek-V4.1-Flash(-1017) with SGLang + KTransformers from what setup.sh built.
+# Serve a GGUF build of DeepSeek-V4.1-Flash-1017 with SGLang + KTransformers from what setup.sh built.
 #
-#   MODEL=<checkpoint dir> ./serve.sh [--foreground|--background]
+#   GGUF=<dir with the GGUF shards and the Engram file> ./serve.sh [--foreground|--background]
 #
-# The routed experts run on the CPU (kt-kernel, MXFP4); attention, the hottest experts and
-# the prefill (experts streamed over PCIe) run on the GPUs. The engram tables are read
-# from the checkpoint shards on disk through engram-adapter/ (a small RAM cache).
+# One GPU and the CPU socket next to it. The routed experts run on the CPU from the GGUF rows
+# (kt-kernel's LLAMAFILE backend, held in an expert cache in RAM); attention and the dense layers
+# run on the GPU in their GGUF types, and the GPU's free memory holds as many hot experts as fit,
+# swapped for what the text routes to. The prefill streams the experts over PCIe to the GPU. The
+# engram tables are read from the Engram GGUF on disk (a small RAM cache).
 #
-# The machine is read at start: one tensor-parallel rank per visible GPU
-# (CUDA_VISIBLE_DEVICES picks them), one CPU expert pool per NUMA node, all physical
-# cores, and the GPUs' compute capability. Every default below can be overridden by
-# the variable named next to it. Logs go to logs/<timestamp>/.
+# The machine is read at start: the first visible GPU (CUDA_VISIBLE_DEVICES picks it), the NUMA
+# node it hangs off, that node's physical cores, its memory (and this process's cgroup limit)
+# for the expert cache. Every default below can be overridden by the variable named next to it.
+# Logs go to logs/<build>/<timestamp>/.
 set -Eeuo pipefail
 export LC_ALL=C PYTHONUNBUFFERED=1
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 root="$here"  # read by lib/*.sh
 mode="${1:---foreground}"
 if [[ "$mode" != "--foreground" && "$mode" != "--background" ]]; then
-  echo "Usage: MODEL=<checkpoint dir> $0 [--foreground|--background]" >&2
+  echo "Usage: GGUF=<GGUF dir> $0 [--foreground|--background]" >&2
   exit 2
 fi
-model="${MODEL:-${DSV41_MODEL:-}}"
-[[ -n "$model" && -f "$model/config.json" ]] || { echo "set MODEL to the checkpoint directory" >&2; exit 4; }
-model="$(cd "$model" && pwd)"
+[[ -n "${GGUF:-}" && -d "$GGUF" ]] || { echo "set GGUF to the directory with the GGUF shards and the Engram file" >&2; exit 4; }
+gguf_dir="$(cd "$GGUF" && pwd)"
+state="$here/state/gguf-$(basename "$gguf_dir")"
+# config.json and the tokenizer that setup.sh wrote for this build (no weights)
+model="$state/config"
+[[ -f "$model/config.json" && -f "$state/experts.json" ]] || { echo "run GGUF=$GGUF ./setup.sh first ($model missing)" >&2; exit 3; }
+# the dense weights in their GGUF types, the routed experts through kt-kernel
+export KT_GGUF_V41_DENSE="$gguf_dir"
+# one resident GPU expert a layer and the hot lend with dynamic slots; the lends make the room,
+# so the static fraction keeps none
+export KT_GPU_EXPERTS="${KT_GPU_EXPERTS:-1}" KT_KV_HOT_LEND="${KT_KV_HOT_LEND:-1}"
+export KT_KV_HOT_EXTRA="${KT_KV_HOT_EXTRA:-auto}" KT_KV_HOT_DYNAMIC_SLOTS="${KT_KV_HOT_DYNAMIC_SLOTS:-1}"
+export KT_HOT_DYNAMIC="${KT_HOT_DYNAMIC:-0}"
+export SGLANG_MEM_FRACTION="${SGLANG_MEM_FRACTION:-1.0}"
+# the GGUF hot method takes -1 for a CPU route: no Marlin runner and no KT_GPU_MASK_ZERO
+export KT_HOT_BACKEND="${KT_HOT_BACKEND:-gguf}"
+export KT_KV_VMM="${KT_KV_VMM:-1}" KT_PREFILL_KV_LEND="${KT_PREFILL_KV_LEND:-1}"
+export KT_PREFILL_PLAN="${KT_PREFILL_PLAN:-1}" KT_PREFILL_SWA_LEND="${KT_PREFILL_SWA_LEND:-1}"
+# V4.1 runs layers 20-39 of a long prefill on the last 2048 rows only
+export KT_PREFILL_PLAN_TAIL_ROWS="${KT_PREFILL_PLAN_TAIL_ROWS:-2048}"
+# the streamed prefill reads the experts' GGUF rows from the file (O_DIRECT) and multiplies them
+# with llama.cpp's MMQ on the GPU
+export KT_GGUF_STREAM_SOURCE="${KT_GGUF_STREAM_SOURCE:-nvme}"
+export KT_GPU_STREAM_PREFILL="${KT_GPU_STREAM_PREFILL:-1024}" KT_GPU_STREAM_EARLY_INIT="${KT_GPU_STREAM_EARLY_INIT:-0}"
+export KT_GPU_STREAM_GROUP="${KT_GPU_STREAM_GROUP:-8}"
+export KT_GGUF_STREAM_MMQ="${KT_GGUF_STREAM_MMQ:-1}"
+export KT_GGUF_STREAM_READERS="${KT_GGUF_STREAM_READERS:-16}" KT_GGUF_STREAM_RING="${KT_GGUF_STREAM_RING:-16}"
+# wo_a is a GGUF tensor here, not the checkpoint's FP8
+export SGLANG_DSV4_WO_A_FP8_NATIVE="${SGLANG_DSV4_WO_A_FP8_NATIVE:-0}"
+# no expert placement: an expert map makes kt-kernel copy the experts into its arenas instead
+# of computing them from the file's rows
+export KT_EXPERT_PLACEMENT="${KT_EXPERT_PLACEMENT:-none}"
+# wq_a and wkv as two layers: GGUF bytes do not go through the fused load
+export SGLANG_OPT_FUSE_WQA_WKV="${SGLANG_OPT_FUSE_WQA_WKV:-0}"
+# kt-kernel computes from the GGUF's rows (mapped, then held in the expert cache), no copy
+export KT_GGUF_NOCOPY="${KT_GGUF_NOCOPY:-1}" KT_GGUF_ZEROCOPY="${KT_GGUF_ZEROCOPY:-1}"
+export KT_LOAD_PREFETCH="${KT_LOAD_PREFETCH:-0}"
+# the prefill lend keeps a copy of the dense weights it lends: read back from the GGUF instead
+export KT_PREFILL_LEND_MIRROR="${KT_PREFILL_LEND_MIRROR:-gguf}"
+export DSV41_LEND_MAX_CHUNK="${DSV41_LEND_MAX_CHUNK:-16384}"
+export SGLANG_DSV41_HOST_KV="${SGLANG_DSV41_HOST_KV:-0}"
+export SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-131072}"
+export DSV41_CACHE_GIB="${DSV41_CACHE_GIB:-2}"
+# glibc hands large frees back to the node instead of keeping them in the arenas
+export MALLOC_MMAP_THRESHOLD_="${MALLOC_MMAP_THRESHOLD_:-1048576}" MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-4194304}"
 venv="$here/.venv"
 python="$venv/bin/python"
 source_dir="$here/third_party/sglang/python"
 adapter_dir="$here/engram-adapter"
-engram_dir="${DSV41_ENGRAM_DIR:-$here/state/engram-$(basename "$model")}"
+engram_dir="${DSV41_ENGRAM_DIR:-$state/engram}"
 export KT_KV_VMM_LIB="${KT_KV_VMM_LIB:-$here/build/libkv_vmm.so}"
 export KT_LEND_PY="$source_dir/sglang/srt/layers/moe/kt_lend.py"
 port="${SGLANG_PORT:-8080}"
 log_root="$here/logs"
-alias_name="${SGLANG_SERVED_NAME:-$(basename "$model")}"
+alias_name="${SGLANG_SERVED_NAME:-$(basename "$gguf_dir")}"
 [[ -x "$python" ]] || { echo "run ./setup.sh first (.venv missing)" >&2; exit 3; }
 [[ -f "$source_dir/sglang/srt/layers/engram.py" ]] || { echo "run ./setup.sh first (patched SGLang missing)" >&2; exit 3; }
 [[ -f "$adapter_dir/librow_store.so" ]] || { echo "run ./setup.sh first (engram-adapter/librow_store.so missing)" >&2; exit 3; }
@@ -46,7 +90,7 @@ has() {
   [[ ! -f "$features_file" ]] || grep -qx "$1" "$features_file"
 }
 if [[ ! -f "$engram_dir/engram-manifest.json" ]]; then
-  "$python" "$here/tools/make-engram-manifest.py" "$model" "$engram_dir" >&2
+  "$python" "$here/tools/make-engram-manifest-gguf.py" "$gguf_dir" "$engram_dir" >&2
 fi
 
 # --- the machine ------------------------------------------------------------
@@ -56,8 +100,13 @@ if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
 else
   mapfile -t gpus < <(nvidia-smi --query-gpu=index --format=csv,noheader)
 fi
-n_gpus="${#gpus[@]}"
-tp="${KT_TP:-$n_gpus}"
+# one GPU: the GGUF experts' blocks do not split across tensor-parallel ranks
+if (( ${#gpus[@]} > 1 )); then
+  echo "one GPU per server: using GPU ${gpus[0]} (set CUDA_VISIBLE_DEVICES to pick another)" >&2
+  gpus=("${gpus[0]}")
+fi
+n_gpus=1
+tp=1
 cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i "${gpus[0]}" | head -1)"
 # Tier 0 supplies a portable Triton attention fallback for Ada (SM89).
 # Other pre-Hopper architectures remain unsupported; do not load the model first.
@@ -77,9 +126,46 @@ n_nodes="$(ls -d /sys/devices/system/node/node[0-9]* 2>/dev/null | wc -l)"
 (( n_nodes > 0 )) || n_nodes=1
 phys_cores="$(lscpu -p=CORE,SOCKET 2>/dev/null | grep -v '^#' | sort -u | wc -l)"
 (( phys_cores > 0 )) || phys_cores="$(nproc)"
-# rank r runs on node r * nodes / tp (two GPUs on two sockets: 0 1; one GPU: 0)
-numa_list=""
-for ((r = 0; r < tp; r++)); do numa_list+="$(( r * n_nodes / tp )) "; done
+# the NUMA node the GPU hangs off (SGLANG_NUMA_NODES=<n> picks one)
+if [[ -z "${SGLANG_NUMA_NODES:-}" ]]; then
+  bus="$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader -i "${gpus[0]}" | head -1 | tr 'A-F' 'a-f')"
+  gpu_node="$(cat "/sys/bus/pci/devices/${bus#0000}/numa_node" 2>/dev/null || cat "/sys/bus/pci/devices/${bus:4}/numa_node" 2>/dev/null || echo -1)"
+  (( gpu_node >= 0 )) 2>/dev/null || gpu_node=0
+  SGLANG_NUMA_NODES="$gpu_node"
+fi
+numa_list="$SGLANG_NUMA_NODES"
+node="${numa_list%% *}"
+# kt-kernel's pool on the same node
+export KT_NUMA_NODES="${KT_NUMA_NODES:-$node}"
+# the node's physical cores
+node_cores="$(lscpu -p=CPU,NODE,CORE 2>/dev/null | grep -v '^#' | awk -F, -v n="$node" '$2==n' | sort -t, -k3,3n -u)"
+n_node_cores="$(echo "$node_cores" | grep -c . || true)"
+(( n_node_cores > 0 )) || { node_cores=""; n_node_cores="$phys_cores"; }
+
+# --- the expert cache ---------------------------------------------------------
+# kt-kernel keeps the experts' GGUF rows it has read in RAM on the node, up to
+# KT_GGUF_EXPERT_CACHE_GIB; what does not fit is read from the file again when routed. The
+# default takes the node's memory (or this process's cgroup limit, if lower) less
+# KT_GGUF_HOST_RESERVE_GIB for everything else. When the node holds every expert and their
+# IQ1_M decode copy, the copy is kept too (KT_GGUF_CACHE_IQ1M_T=1: faster CPU decode for the
+# IQ1_M layers, at 76 more bytes a block of 256); otherwise the raw rows only.
+node_gib="$(awk '/MemTotal/ {printf "%d", $4 / 1048576}' "/sys/devices/system/node/node$node/meminfo" 2>/dev/null || true)"
+node_gib="${node_gib:-$(awk '/MemTotal/ {printf "%d", $2 / 1048576}' /proc/meminfo)}"
+cg_max="$(cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup | head -1)/memory.max" 2>/dev/null || echo max)"
+if [[ "$cg_max" =~ ^[0-9]+$ ]] && (( cg_max / 1073741824 < node_gib )); then node_gib=$(( cg_max / 1073741824 )); fi
+budget_gib=$(( node_gib - ${KT_GGUF_HOST_RESERVE_GIB:-18} ))
+read -r raw_gib copy_gib < <("$python" -c "
+import json, math; e = json.load(open('$state/experts.json'))
+print(math.ceil(e['raw_bytes'] / 2**30), math.ceil(e['iq1m_copy_bytes'] / 2**30))")
+if [[ -z "${KT_GGUF_CACHE_IQ1M_T:-}" ]]; then
+  KT_GGUF_CACHE_IQ1M_T=0
+  (( copy_gib > 0 && budget_gib >= raw_gib + copy_gib + 4 )) && KT_GGUF_CACHE_IQ1M_T=1
+fi
+export KT_GGUF_CACHE_IQ1M_T
+want_gib=$(( raw_gib + 4 + (KT_GGUF_CACHE_IQ1M_T == 1 ? copy_gib : 0) ))
+cache_gib=$(( want_gib < budget_gib ? want_gib : budget_gib ))
+export KT_GGUF_EXPERT_CACHE_GIB="${KT_GGUF_EXPERT_CACHE_GIB:-$cache_gib}"
+(( KT_GGUF_EXPERT_CACHE_GIB >= 8 )) || { echo "node $node has ${node_gib} GiB: too little for the expert cache (KT_GGUF_EXPERT_CACHE_GIB)" >&2; exit 5; }
 
 # --- model and memory -------------------------------------------------------
 context_length="${SGLANG_CONTEXT_LENGTH:-1048576}"
@@ -88,8 +174,16 @@ max_total_tokens="${SGLANG_MAX_TOTAL_TOKENS:-$context_length}"
 # memory with more, swapped for what the text routes to (more here only takes memory the
 # lend would use, and must fit at load)
 gpu_experts="${KT_GPU_EXPERTS:-1}"
-cpu_threads="${KT_CPU_THREADS:-$phys_cores}"
-threadpools="${KT_THREADPOOL_COUNT:-$n_nodes}"
+cpu_threads="${KT_CPU_THREADS:-$n_node_cores}"
+# the cache's readers fill it from the file on the node's last cores, the experts compute on the rest
+if [[ -z "${KT_GGUF_PREFETCH_CPUS:-}" && -n "$node_cores" ]] && (( n_node_cores >= 4 )); then
+  spare=$(( n_node_cores >= 16 ? 4 : 1 ))
+  export KT_GGUF_PREFETCH_CPUS="$(echo "$node_cores" | tail -n "$spare" | cut -d, -f1 | paste -sd,)"
+  export KT_GGUF_PREFETCH_THREADS="${KT_GGUF_PREFETCH_THREADS:-$(( spare * 4 ))}"
+  export KT_GGUF_CACHE_PIECE_KIB="${KT_GGUF_CACHE_PIECE_KIB:-512}"
+  [[ -n "${KT_CPU_THREADS:-}" ]] || cpu_threads=$(( n_node_cores - spare ))
+fi
+threadpools="${KT_THREADPOOL_COUNT:-1}"
 deferred_experts="${KT_DEFERRED_EXPERTS:-0}"  # >0 drops expert work for speed; it hurts the text
 mem_fraction="${SGLANG_MEM_FRACTION:-0.81}"
 kv_cache_dtype="${SGLANG_KV_CACHE_DTYPE:-fp8_e4m3}"
@@ -216,7 +310,7 @@ fi
 
 # --- engram from disk ---------------------------------------------------------
 export DSV41_ENGRAM_DIR="$engram_dir"
-export DSV41_ENGRAM_BASE="${DSV41_ENGRAM_BASE:-$model}"
+export DSV41_ENGRAM_BASE="${DSV41_ENGRAM_BASE:-$gguf_dir}"
 export DSV41_CACHE_GIB="${DSV41_CACHE_GIB:-8}"
 export DSV41_ENGRAM_MODE="${DSV41_ENGRAM_MODE:-nvme}"
 
@@ -236,7 +330,7 @@ fi
 # prefill, so the chunk can grow without taking the KV pool
 KT_PREFILL_LEND="${KT_PREFILL_LEND:-1}"
 export KT_PREFILL_LEND
-log_name="$(basename "$model")"
+log_name="$(basename "$gguf_dir")"
 if [[ "$KT_PREFILL_LEND" == 1 ]]; then
   lend_max_chunk="${DSV41_LEND_MAX_CHUNK:-6144}"
   export KT_PREFILL_LEND_MAX_CHUNK="$lend_max_chunk"
@@ -261,7 +355,7 @@ fi
 extra_args+=(--swa-prefix-tails "$swa_prefix_tails")
 
 # --- environment ----------------------------------------------------------------
-run_dir="$log_root/$log_name/$(date +%Y%m%d-%H%M%S)"
+run_dir="$log_root/$log_name/$(date +%Y%m%d-%H%M%S)${SGLANG_PORT:+-p$SGLANG_PORT}"  # two servers started in the same second
 mkdir -p "$run_dir"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="$(IFS=,; echo "${gpus[*]}")"
@@ -309,8 +403,8 @@ command=(
   --tensor-parallel-size "$tp"
   --numa-node $numa_list
   --disable-custom-all-reduce
-  --kt-weight-path "$model"
-  --kt-method MXFP4
+  --kt-weight-path "$gguf_dir"
+  --kt-method LLAMAFILE
   --kt-num-gpu-experts "$gpu_experts"
   --kt-cpuinfer "$cpu_threads"
   --kt-threadpool-count "$threadpools"
@@ -321,7 +415,7 @@ command=(
   --mem-fraction-static "$mem_fraction"
   --max-running-requests 1
   --chunked-prefill-size "$chunked_prefill"
-  --max-prefill-tokens "$chunked_prefill"
+  --max-prefill-tokens "$(( chunked_prefill + KT_PREFILL_PLAN_TAIL_ROWS ))"
   --sampling-backend pytorch
   --watchdog-timeout 1200
   --disable-shared-experts-fusion
@@ -332,8 +426,9 @@ command=(
   "${spec_args[@]}"
 )
 
-printf '%s\n' "DeepSeek-V4.1-Flash on SGLang + KTransformers: $model"
-printf '%s\n' "GPUs ${CUDA_VISIBLE_DEVICES} (sm $cap), TP $tp on NUMA nodes $numa_list; CPU experts: $cpu_threads threads in $threadpools pools; GPU experts $gpu_experts a layer"
+printf '%s\n' "DeepSeek-V4.1-Flash-1017 GGUF on SGLang + KTransformers: $gguf_dir"
+printf '%s\n' "GPU ${CUDA_VISIBLE_DEVICES} (sm $cap) on NUMA node $numa_list; CPU experts: $cpu_threads threads; GPU experts $gpu_experts a layer + the hot lend"
+printf '%s\n' "expert cache: $KT_GGUF_EXPERT_CACHE_GIB GiB of the node's ${node_gib} GiB for ${raw_gib} GiB of experts; IQ1_M decode copy: $KT_GGUF_CACHE_IQ1M_T (${copy_gib} GiB)"
 printf '%s\n' "patch tier $tier; context $context_length; attention output FP8 before wo_a: block ${SGLANG_DSV4_O_FP8_QDQ_BLOCK:-0}; KV layout ${SGLANG_DSV4_KV_LAYOUT:-v4}"
 (( tier >= 1 )) && printf '%s\n' "tier-1 features: $( [[ -f "$features_file" ]] && tr '\n' ' ' < "$features_file" || echo all)"
 (( tier >= 1 )) && printf '%s\n' "wo_a native FP8: $SGLANG_DSV4_WO_A_FP8_NATIVE; vision tower on demand: $SGLANG_DSV4_VISION_ON_DEMAND; MXFP4 MoE fp32: $SGLANG_MXFP4_MOE_FP32; Marlin MoE fp32 glue: $SGLANG_MARLIN_MOE_FP32_GLUE; CPU scale codes: $KT_MXFP4_SCALE_CODES; hot lend spare floor: ${KT_KV_HOT_SPARE_FLOOR_MB:-off} MiB; dynamic hot slots: ${KT_KV_HOT_DYNAMIC_SLOTS:-0}, resident rows too: ${KT_KV_HOT_DYNAMIC_RESIDENT:-0}"

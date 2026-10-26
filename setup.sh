@@ -1,23 +1,18 @@
 #!/usr/bin/env bash
-# Build everything serve.sh needs, inside this directory:
-#   third_party/sglang         sgl-project/sglang main @ 65633129 + patches/sglang-tier*
-#   third_party/ktransformers  kvcache-ai/ktransformers @ 95009ea (+ patches/kt-kernel-tree.patch
-#                              and patches/kt-kernel-llama-cpp.patch from tier 1)
+# Build everything serve.sh needs for a GGUF build of DeepSeek-V4.1-Flash-1017, inside this directory:
+#   third_party/sglang         sgl-project/sglang main @ 65633129 + patches/sglang-tier0..2 + patches/gguf/sglang-gguf.patch
+#   third_party/ktransformers  kvcache-ai/ktransformers @ 95009ea + patches/kt-kernel-*.patch + patches/gguf/kt-*.patch
 #   .venv                      Python 3.12, requirements.txt, kt-kernel built for this CPU and GPU
-#   engram-adapter/librow_store.so, build/libkv_vmm.so
-#   state/engram-<model>/engram-manifest.json   when MODEL=<checkpoint dir> is given
+#   engram-adapter/librow_store.so, build/libkv_vmm.so, the GGUF CUDA kernels (.cache/torch_extensions)
+#   state/gguf-<name>/         for GGUF=<dir>: config/ (config.json and tokenizer for SGLang),
+#                              engram/engram-manifest.json, experts.json (the routed experts' bytes)
 #
-# usage: [MODEL=<checkpoint dir>] [TIER=0|1|2] [SGLANG_FEATURES=a,b,...] ./setup.sh
+# usage: GGUF=<dir with the GGUF shards and the Engram file> [BASE=<dir>] ./setup.sh
 #
-# TIER picks how much of this repository's SGLang changes go in, each tier on top of the ones
-# below it (docs/patches.md):
-#   0  run DeepSeek-V4.1-Flash-1017 correctly on the hybrid MoE, on any GPU; KTransformers as pinned
-#   1  + speed and memory: streamed prefill, lends, hot experts, the CPU kernels
-#   2  + all-reduce through host memory, for two GPUs without peer access (default)
-# Changing TIER re-applies the patches and rebuilds kt-kernel.
-# Tier 1 is one patch per feature (patches/sglang-tier1/, docs/tier1.md). SGLANG_FEATURES picks
-# some of them, comma-separated (e.g. fp8-decode,engram-row-prefetch), or none; default all. A feature's
-# prerequisites (patches/sglang-tier1/requires.txt) must be picked too.
+# GGUF is a directory holding one build of ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF (its shards
+# and DeepSeek-V4.1-Flash-Engram-IQ4_NL.gguf side by side, as the pack's README downloads them). SGLang
+# reads the architecture and the tokenizer from deepseek-ai/DeepSeek-V4.1-Flash-1017: BASE is a directory
+# with its config.json, tokenizer and encoding/; without BASE those few files are downloaded (no weights).
 # Needs: git, a C/C++ compiler, the CUDA toolkit (CUDA_HOME, default /usr/local/cuda;
 # built and run here with 13.1), libnuma and hwloc headers (Debian/Ubuntu: libnuma-dev
 # libhwloc-dev), and either uv or python3.12. Re-running skips the finished steps.
@@ -30,33 +25,16 @@ here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
 SGLANG_COMMIT=656331295619a4d0267b40b7da0b5cd5b549fcbc
 KT_COMMIT=95009ea6856c0799e517e93cb12be5e8494bc7ce
-TIER="${TIER:-2}"
-[[ "$TIER" =~ ^[012]$ ]] || { echo "TIER must be 0, 1 or 2 (tiers 2 and 3 of before 10-21 are 1 and 2)" >&2; exit 2; }
-SGLANG_FEATURES="${SGLANG_FEATURES:-all}"
-# the SGLang patches up to TIER, in order (paths under patches/)
+# the GGUF patch sits on the whole of the MXFP4 recipe's SGLang changes (tiers 0 to 2, every tier-1 feature)
+TIER=2
 sglang_patches=()
 for f in "$here"/patches/sglang-tier0/[0-9][0-9]-*.patch; do sglang_patches+=("sglang-tier0/$(basename "$f")"); done
 features=()
-if (( TIER >= 1 )); then
-  for f in "$here"/patches/sglang-tier1/[0-9][0-9]-*.patch; do
-    slug="$(basename "$f" .patch)"; slug="${slug#[0-9][0-9]-}"
-    if [[ "$SGLANG_FEATURES" == all || ",$SGLANG_FEATURES," == *",$slug,"* ]]; then
-      features+=("$slug")
-      sglang_patches+=("sglang-tier1/$(basename "$f")")
-    fi
-  done
-  for want in ${SGLANG_FEATURES//,/ }; do
-    [[ "$want" == all || "$want" == none || " ${features[*]} " == *" $want "* ]] || { echo "no tier-1 feature named $want (patches/sglang-tier1/)" >&2; exit 2; }
-  done
-  while IFS=: read -r feat needs; do
-    [[ -z "$feat" || "$feat" == \#* ]] && continue
-    [[ " ${features[*]} " == *" $feat "* ]] || continue
-    for n in $needs; do
-      [[ " ${features[*]} " == *" $n "* ]] || { echo "tier-1 feature $feat needs $n (add it to SGLANG_FEATURES)" >&2; exit 2; }
-    done
-  done < "$here/patches/sglang-tier1/requires.txt"
-fi
-(( TIER >= 2 )) && sglang_patches+=(sglang-tier2-no-p2p.patch)
+for f in "$here"/patches/sglang-tier1/[0-9][0-9]-*.patch; do
+  slug="$(basename "$f" .patch)"; features+=("${slug#[0-9][0-9]-}")
+  sglang_patches+=("sglang-tier1/$(basename "$f")")
+done
+sglang_patches+=(sglang-tier2-no-p2p.patch gguf/sglang-gguf.patch)
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 mkdir -p third_party build state
 step() { printf '\n== %s\n' "$*"; }
@@ -65,8 +43,7 @@ step() { printf '\n== %s\n' "$*"; }
 built_as() { [[ -f "$1" && "$(cat "$1")" == "$2" ]]; }
 patch_hash() { (cd "$here/patches" && cat "$@") | sha256sum | cut -c1-12; }
 sglang_state="$TIER $(patch_hash "${sglang_patches[@]}")"
-kt_variant=pinned
-(( TIER >= 1 )) && kt_variant="patched $(patch_hash kt-kernel-tree.patch kt-kernel-llama-cpp.patch kt-kernel-load-prefetch.py)"
+kt_variant="patched gguf $(patch_hash kt-kernel-tree.patch kt-kernel-llama-cpp.patch kt-kernel-load-prefetch.py gguf/kt-kernel-gguf.patch gguf/kt-llamafile-iq2xs.patch)"
 # a patch is checked against the pinned tree first; nothing is applied when it does not fit
 apply_checked() {
   local tree="$1" patch="$2"
@@ -77,7 +54,7 @@ apply_checked() {
   git -C "$tree" apply --whitespace=nowarn "$patch"
 }
 
-step "SGLang @ ${SGLANG_COMMIT:0:8}, tier $TIER${features[*]:+ (tier 1: ${features[*]})}"
+step "SGLang @ ${SGLANG_COMMIT:0:8}, tiers 0-2 and GGUF"
 if [[ ! -d third_party/sglang/.git ]]; then
   git clone --filter=blob:none https://github.com/sgl-project/sglang.git third_party/sglang
 fi
@@ -102,10 +79,11 @@ if ! built_as third_party/ktransformers/.dsv41-1017-patched "$kt_variant"; then
   git -C third_party/ktransformers clean -fdq
   git -C third_party/ktransformers submodule update --init --force --quiet third_party/llama.cpp third_party/pybind11
   git -C third_party/ktransformers/third_party/llama.cpp clean -fdq
-  if [[ "$kt_variant" == patched* ]]; then
-    apply_checked third_party/ktransformers "$here/patches/kt-kernel-tree.patch"
-    apply_checked third_party/ktransformers/third_party/llama.cpp "$here/patches/kt-kernel-llama-cpp.patch"
-  fi
+  apply_checked third_party/ktransformers "$here/patches/kt-kernel-tree.patch"
+  apply_checked third_party/ktransformers/third_party/llama.cpp "$here/patches/kt-kernel-llama-cpp.patch"
+  # the GGUF experts: kt-kernel's LLAMAFILE backend, and IQ2_XS in its x86 kernels
+  apply_checked third_party/ktransformers "$here/patches/gguf/kt-kernel-gguf.patch"
+  apply_checked third_party/ktransformers "$here/patches/gguf/kt-llamafile-iq2xs.patch"
   echo "$kt_variant" > third_party/ktransformers/.dsv41-1017-patched
 fi
 
@@ -154,7 +132,7 @@ if ! built_as build/.kt-kernel-done "$kt_variant"; then
   echo "CUDA archs $CPUINFER_CUDA_ARCHS, CPU target $CPUINFER_CPU_INSTRUCT"
   pip_install --no-deps --no-build-isolation third_party/ktransformers/kt-kernel
   # each expert layer is read into the page cache in parallel before kt-kernel copies it
-  [[ "$kt_variant" == patched* ]] && "$py" patches/kt-kernel-load-prefetch.py "$site"
+  "$py" patches/kt-kernel-load-prefetch.py "$site"
   echo "$kt_variant" > build/.kt-kernel-done
 fi
 
@@ -162,7 +140,7 @@ fi
 # compile on the first long prompt, while the expert arenas fill the NUMA nodes, and a node-local OOM
 # kills the scheduler before the build finishes; so it is built here, once per FlashInfer version and
 # GPU arch, into the cache serve.sh uses.
-if (( TIER >= 1 )) && [[ " ${features[*]} " == *" stream-prefill "* ]] && command -v nvidia-smi >/dev/null; then
+if command -v nvidia-smi >/dev/null; then
   cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader | head -1)"
   fi_backend="${cap/./}"
   case "$cap" in 9.0|10.0|10.3|12.0|12.1) fi_arch="${cap}a" ;; *) fi_arch="$cap" ;; esac
@@ -185,12 +163,40 @@ fi
 # the KV pool module looks for the library beside itself first
 cp build/libkv_vmm.so third_party/sglang/python/sglang/srt/layers/moe/libkv_vmm.so
 
-if [[ -n "${MODEL:-}" ]]; then
-  step "engram manifest for $MODEL"
-  "$py" tools/make-engram-manifest.py "$MODEL" "state/engram-$(basename "$MODEL")"
+# The GGUF kernels (the experts' MMQ for the streamed prefill and the hot slots, the decode's vector
+# kernels) are torch extensions compiled on first use; built here for the same reason as above.
+if command -v nvidia-smi >/dev/null; then
+  step "GGUF CUDA kernels"
+  TORCH_EXTENSIONS_DIR="${TORCH_EXTENSIONS_DIR:-$here/.cache/torch_extensions}" MAX_JOBS="${MAX_JOBS:-16}" \
+  PATH="$CUDA_HOME/bin:$here/.venv/bin:$PATH" "$py" -c "
+from sglang.srt.layers.moe import kt_gguf_moe_mmq, kt_gguf_moe_multi
+kt_gguf_moe_mmq._load()
+kt_gguf_moe_multi._load()
+kt_gguf_moe_multi._load(per_route=True)
+print('built (or cached)')"
+fi
+
+if [[ -n "${GGUF:-}" ]]; then
+  gguf_dir="$(cd "$GGUF" && pwd)"
+  out="state/gguf-$(basename "$gguf_dir")"
+  step "SGLang config for $gguf_dir"
+  if [[ ! -f "$out/config/config.json" ]]; then
+    base="${BASE:-}"
+    if [[ -z "$base" ]]; then
+      # the base model's config, tokenizer and chat encoding only
+      base="state/base-DeepSeek-V4.1-Flash-1017"
+      "$here/.venv/bin/hf" download deepseek-ai/DeepSeek-V4.1-Flash-1017 --local-dir "$base" \
+        --include config.json --include tokenizer.json --include tokenizer_config.json \
+        --include "encoding/*" --include "inference/*"
+    fi
+    "$py" tools/make-gguf-config.py "$base" "$out/config"
+  fi
+  step "engram manifest and expert sizes for $gguf_dir"
+  [[ -f "$out/engram/engram-manifest.json" ]] || "$py" tools/make-engram-manifest-gguf.py "$gguf_dir" "$out/engram"
+  [[ -f "$out/experts.json" ]] || "$py" tools/gguf-expert-bytes.py "$gguf_dir" "$out/experts.json"
 fi
 
 step "check: the attention-output FP8 kernel on this GPU"
-"$py" tools/dsv4-o-fp8-qdq-test.py ${MODEL:+"$MODEL"} 2>&1 | grep -v -i warn | tail -3
+"$py" tools/dsv4-o-fp8-qdq-test.py 2>&1 | grep -v -i warn | tail -3
 
-printf '\nDone. Start the server with: MODEL=<checkpoint dir> ./serve.sh\n'
+printf '\nDone. Start the server with: GGUF=<the same dir> ./serve.sh\n'

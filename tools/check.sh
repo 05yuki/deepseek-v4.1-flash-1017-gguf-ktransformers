@@ -3,14 +3,14 @@
 # launch of a setup compiles kernels and may calibrate the prefill chunk, so up to an hour), sends one
 # short chat request, checks that text comes back, and stops the server it started.
 #
-#   MODEL=<checkpoint dir> tools/check.sh
+#   GGUF=<GGUF dir> tools/check.sh
 #
 # Exit status 0 when an answer came back; the server log's path is printed either way.
 set -Eeuo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-[[ -n "${MODEL:-}" ]] || { echo "set MODEL to the checkpoint directory" >&2; exit 2; }
+[[ -n "${GGUF:-}" ]] || { echo "set GGUF to the directory with the GGUF shards" >&2; exit 2; }
 port="${SGLANG_PORT:-8080}"
-log_dir="$here/logs/$(basename "$(cd "$MODEL" && pwd)")"
+log_dir="$here/logs/$(basename "$(cd "$GGUF" && pwd)")"
 before="$(readlink -f "$log_dir/current" 2>/dev/null || true)"
 
 "$here/serve.sh" --background
