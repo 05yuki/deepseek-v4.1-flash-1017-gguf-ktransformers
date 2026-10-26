@@ -15,7 +15,8 @@
 # with its config.json, tokenizer and encoding/; without BASE those few files are downloaded (no weights).
 # Needs: git, a C/C++ compiler, the CUDA toolkit (CUDA_HOME, default /usr/local/cuda;
 # built and run here with 13.1), libnuma and hwloc headers (Debian/Ubuntu: libnuma-dev
-# libhwloc-dev), and either uv or python3.12. Re-running skips the finished steps.
+# libhwloc-dev), and either uv or python3.12 with its headers (python3.12-dev). Re-running skips the
+# finished steps.
 # Knobs: CUDA_HOME; KT_CUDA_ARCHS (default: the visible GPUs' compute capability);
 # CPUINFER_CPU_INSTRUCT (kt-kernel's CPU target, default NATIVE: this machine's ISA);
 # CMAKE_ARGS (extra CMake flags for kt-kernel, space separated); headers and libraries
@@ -148,7 +149,15 @@ if command -v nvidia-smi >/dev/null; then
   FLASHINFER_WORKSPACE_BASE="${SGLANG_CACHE_DIR:-$here/.cache/sglang}" \
   FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-$fi_arch}" MAX_JOBS="${MAX_JOBS:-16}" \
   PATH="$CUDA_HOME/bin:$here/.venv/bin:$PATH" \
-    "$py" -c "from flashinfer.fused_moe.core import get_cutlass_fused_moe_module as g; g('$fi_backend'); print('built (or cached)')"
+    "$py" -c "
+from flashinfer.fused_moe.core import get_cutlass_fused_moe_module as g
+try:
+    g('$fi_backend')
+except ValueError as e:
+    # FlashInfer has no CUTLASS MoE for this arch; the GGUF prefill runs on MMQ and does not need it
+    print(f'not built: {e}')
+else:
+    print('built (or cached)')"
 fi
 
 step "engram row store (engram-adapter/librow_store.so)"
@@ -173,6 +182,9 @@ from sglang.srt.layers.moe import kt_gguf_moe_mmq, kt_gguf_moe_multi
 kt_gguf_moe_mmq._load()
 kt_gguf_moe_multi._load()
 kt_gguf_moe_multi._load(per_route=True)
+# below SM80: sgl-kernel's ops for this GPU's arch (the wheel has sm_80+ only)
+from sglang.srt.layers import kt_sm75_ops
+kt_sm75_ops.load_if_needed()
 print('built (or cached)')"
 fi
 

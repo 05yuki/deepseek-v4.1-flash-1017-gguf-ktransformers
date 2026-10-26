@@ -63,7 +63,6 @@ export KT_LOAD_PREFETCH="${KT_LOAD_PREFETCH:-0}"
 export KT_PREFILL_LEND_MIRROR="${KT_PREFILL_LEND_MIRROR:-gguf}"
 export DSV41_LEND_MAX_CHUNK="${DSV41_LEND_MAX_CHUNK:-16384}"
 export SGLANG_DSV41_HOST_KV="${SGLANG_DSV41_HOST_KV:-0}"
-export SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-131072}"
 export DSV41_CACHE_GIB="${DSV41_CACHE_GIB:-2}"
 # glibc hands large frees back to the node instead of keeping them in the arenas
 export MALLOC_MMAP_THRESHOLD_="${MALLOC_MMAP_THRESHOLD_:-1048576}" MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-4194304}"
@@ -108,19 +107,36 @@ fi
 n_gpus=1
 tp=1
 cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i "${gpus[0]}" | head -1)"
-# Tier 0 supplies a portable Triton attention fallback for Ada (SM89).
-# Other pre-Hopper architectures remain unsupported; do not load the model first.
-if [[ "$cap" != "8.9" && "${cap%%.*}" =~ ^[0-9]+$ ]] && (( ${cap%%.*} < 9 )); then
-  echo "GPU ${gpus[0]} is compute capability $cap: attention needs SM89 (Ada) or SM90+" >&2
+# Tier 0 supplies a portable Triton attention fallback for Ada (SM89); the GGUF patch takes it to
+# Turing (SM75). Other pre-Hopper architectures remain unsupported; do not load the model first.
+if [[ "$cap" != "8.9" && "$cap" != "7.5" && "${cap%%.*}" =~ ^[0-9]+$ ]] && (( ${cap%%.*} < 9 )); then
+  echo "GPU ${gpus[0]} is compute capability $cap: attention needs SM75 (Turing), SM89 (Ada) or SM90+" >&2
   exit 3
 fi
-if [[ "$cap" == "8.9" ]]; then
-  # Ada uses the portable indexer and mHC paths as well as sparse attention.
+if [[ "$cap" == "8.9" || "$cap" == "7.5" ]]; then
+  # Ada and Turing use the portable indexer and mHC paths as well as sparse attention.
   # The DeepGEMM and TileLang alternatives require newer GPU architectures.
   export SGLANG_OPT_USE_TOPK_V2="${SGLANG_OPT_USE_TOPK_V2:-0}"
   export SGLANG_OPT_USE_TILELANG_MHC_PRE="${SGLANG_OPT_USE_TILELANG_MHC_PRE:-0}"
   export SGLANG_OPT_DEEPGEMM_HC_PRENORM="${SGLANG_OPT_DEEPGEMM_HC_PRENORM:-0}"
   export SGLANG_FP8_PAGED_MQA_LOGITS_TORCH="${SGLANG_FP8_PAGED_MQA_LOGITS_TORCH:-1}"
+fi
+sm75_bf16=0
+if [[ "$cap" == "7.5" ]]; then
+  # Turing keeps the model in bf16 (DSV4's JIT kernels take no fp16; the tensor-core dots go
+  # through fp32), and the GGUF dense layers' prefill runs on MMQ in their GGUF types (the bf16
+  # copy path needs a bf16 cuBLAS GEMM, SM80+)
+  export KT_SM75_BF16=1
+  sm75_bf16=1
+  export SGLANG_GGUF_DEQUANT_ROWS="${SGLANG_GGUF_DEQUANT_ROWS:-1000000000}"
+  export SGLANG_DSV4_WO_A_DEQUANT_ROWS="${SGLANG_DSV4_WO_A_DEQUANT_ROWS:-1000000000}"
+fi
+# 131,072 tokens; a card under 12 GB (an 8 GB RTX 20) keeps 32,768, its room after the weights
+vram_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${gpus[0]}" | head -1)"
+if [[ "$vram_mib" =~ ^[0-9]+$ ]] && (( vram_mib < 12288 )); then
+  export SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-32768}"
+else
+  export SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-131072}"
 fi
 n_nodes="$(ls -d /sys/devices/system/node/node[0-9]* 2>/dev/null | wc -l)"
 (( n_nodes > 0 )) || n_nodes=1
@@ -191,6 +207,7 @@ chunked_prefill="${SGLANG_CHUNKED_PREFILL_SIZE:-2048}"
 swa_prefix_tails="${SGLANG_SWA_PREFIX_TAILS:-6}"
 # split on whitespace on purpose: SGLANG_EXTRA_ARGS="--a 1 --b 2" gives four words (no quoting inside)
 extra_args=(${SGLANG_EXTRA_ARGS:-})
+(( sm75_bf16 )) && extra_args+=(--dtype bfloat16)
 radix_args=(--disable-radix-cache)
 [[ "${DSV41_RADIX:-0}" == "1" ]] && radix_args=()
 

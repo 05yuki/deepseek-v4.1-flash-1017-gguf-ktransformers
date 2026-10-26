@@ -1,3 +1,332 @@
+diff -ruN a/python/sglang/kernels/ops/attention/dsv4/fp4_rope_fake_quant.py b/python/sglang/kernels/ops/attention/dsv4/fp4_rope_fake_quant.py
+--- a/python/sglang/kernels/ops/attention/dsv4/fp4_rope_fake_quant.py
++++ b/python/sglang/kernels/ops/attention/dsv4/fp4_rope_fake_quant.py
+@@ -11,6 +11,20 @@
+ 
+ from sglang.kernels.ops.quantization.fp4_fake_quant import FP4_AMAX_FLOOR
+ 
++# Triton has no e4m3 type below SM89
++_PRE_SM89 = tl.constexpr(bool(torch.cuda.is_available() and torch.version.hip is None and torch.cuda.get_device_capability() < (8, 9)))
++
++
++@triton.jit
++def _round_e4m3(x):
++    """A positive float32 in [2^-9, 448] rounded to the nearest e4m3 value (ties to even), as a float32."""
++    if _PRE_SM89:
++        e = tl.maximum(((x.to(tl.int32, bitcast=True) >> 23) & 0xFF) - 127, -6)
++        q = ((e + 124) << 23).to(tl.float32, bitcast=True)  # 2^(e - 3), the e4m3 spacing at x
++        return tl.minimum(libdevice.rint(x / q) * q, 448.0)
++    else:
++        return x.to(tl.float8e4nv).to(tl.float32)
++
+ 
+ @triton.jit
+ def rope_tail_fake_quant_fp4_row(
+@@ -54,7 +68,7 @@
+     amax = tl.max(tl.abs(vb), axis=1)
+     if COMPRESSED_KV:
+         scale = tl.minimum(tl.maximum(amax * (1.0 / 6.0), 2.0**-9), 448.0)
+-        scale = scale.to(tl.float8e4nv).to(tl.float32)
++        scale = _round_e4m3(scale)
+         s = tl.div_rn(vb, scale[:, None])
+     else:
+         amax = tl.maximum(amax, AMAX_FLOOR) * (1.0 / 6.0)
+diff -ruN a/python/sglang/kernels/ops/attention/dsv4/triton_sparse_decode/triton_mla_kernels_decode_fused.py b/python/sglang/kernels/ops/attention/dsv4/triton_sparse_decode/triton_mla_kernels_decode_fused.py
+--- a/python/sglang/kernels/ops/attention/dsv4/triton_sparse_decode/triton_mla_kernels_decode_fused.py
++++ b/python/sglang/kernels/ops/attention/dsv4/triton_sparse_decode/triton_mla_kernels_decode_fused.py
+@@ -23,6 +23,33 @@
+ # gfx950/MI350 and CUDA store OCP e4m3fn (bias 7).
+ _KV_FP8_TY = tl.float8e4b8 if is_gfx942_supported() else tl.float8e4nv
+ 
++# below SM80 Triton has no FP8 type and no bf16 dot
++_PRE_SM80 = tl.constexpr(bool(torch.cuda.is_available() and torch.version.hip is None and torch.cuda.get_device_capability() < (8, 0)))
++
++
++@triton.jit
++def _kv_fp8(x_u8):
++    """e4m3 bytes as values: the FP8 type, or below SM80 float32 built from the bit fields (e4m3fn; no NaN bytes
++    are written)."""
++    if _PRE_SM80:
++        x = x_u8.to(tl.int32)
++        e = (x >> 3) & 0xF
++        m = x & 7
++        normal = (((x >> 7) << 31) | ((e + 120) << 23) | (m << 20)).to(tl.float32, bitcast=True)
++        sub = m.to(tl.float32) * 0.001953125
++        sub = tl.where((x >> 7) != 0, -sub, sub)
++        return tl.where(e == 0, sub, normal)
++    else:
++        return x_u8.to(_KV_FP8_TY, bitcast=True)
++
++
++@triton.jit
++def _kdot(a, b):
++    if _PRE_SM80:
++        return tl.dot(a.to(tl.float32), b.to(tl.float32), input_precision="ieee")
++    else:
++        return tl.dot(a, b)
++
+ 
+ def _bucket_total_tokens(total_tokens: int) -> int:
+     """Round total_tokens up to the nearest power of 2 for autotune key stability."""
+@@ -219,44 +246,44 @@
+ 
+     qk = tl.zeros([BLOCK_H, BLOCK_N], dtype=tl.float32)
+ 
+-    nope_fp8_0 = nope_uint8_0.to(_KV_FP8_TY, bitcast=True)
++    nope_fp8_0 = _kv_fp8(nope_uint8_0)
+     kv_0 = (nope_fp8_0.to(tl.bfloat16) * scale_bf16_0[:, None]).to(tl.bfloat16)
+     kv_0 = tl.where(valid_2d, kv_0, 0.0)
+-    qk += tl.dot(q_0, tl.trans(kv_0)).to(tl.float32)
++    qk += _kdot(q_0, tl.trans(kv_0)).to(tl.float32)
+ 
+-    nope_fp8_1 = nope_uint8_1.to(_KV_FP8_TY, bitcast=True)
++    nope_fp8_1 = _kv_fp8(nope_uint8_1)
+     kv_1 = (nope_fp8_1.to(tl.bfloat16) * scale_bf16_1[:, None]).to(tl.bfloat16)
+     kv_1 = tl.where(valid_2d, kv_1, 0.0)
+-    qk += tl.dot(q_1, tl.trans(kv_1)).to(tl.float32)
++    qk += _kdot(q_1, tl.trans(kv_1)).to(tl.float32)
+ 
+-    nope_fp8_2 = nope_uint8_2.to(_KV_FP8_TY, bitcast=True)
++    nope_fp8_2 = _kv_fp8(nope_uint8_2)
+     kv_2 = (nope_fp8_2.to(tl.bfloat16) * scale_bf16_2[:, None]).to(tl.bfloat16)
+     kv_2 = tl.where(valid_2d, kv_2, 0.0)
+-    qk += tl.dot(q_2, tl.trans(kv_2)).to(tl.float32)
++    qk += _kdot(q_2, tl.trans(kv_2)).to(tl.float32)
+ 
+-    nope_fp8_3 = nope_uint8_3.to(_KV_FP8_TY, bitcast=True)
++    nope_fp8_3 = _kv_fp8(nope_uint8_3)
+     kv_3 = (nope_fp8_3.to(tl.bfloat16) * scale_bf16_3[:, None]).to(tl.bfloat16)
+     kv_3 = tl.where(valid_2d, kv_3, 0.0)
+-    qk += tl.dot(q_3, tl.trans(kv_3)).to(tl.float32)
++    qk += _kdot(q_3, tl.trans(kv_3)).to(tl.float32)
+ 
+-    nope_fp8_4 = nope_uint8_4.to(_KV_FP8_TY, bitcast=True)
++    nope_fp8_4 = _kv_fp8(nope_uint8_4)
+     kv_4 = (nope_fp8_4.to(tl.bfloat16) * scale_bf16_4[:, None]).to(tl.bfloat16)
+     kv_4 = tl.where(valid_2d, kv_4, 0.0)
+-    qk += tl.dot(q_4, tl.trans(kv_4)).to(tl.float32)
++    qk += _kdot(q_4, tl.trans(kv_4)).to(tl.float32)
+ 
+-    nope_fp8_5 = nope_uint8_5.to(_KV_FP8_TY, bitcast=True)
++    nope_fp8_5 = _kv_fp8(nope_uint8_5)
+     kv_5 = (nope_fp8_5.to(tl.bfloat16) * scale_bf16_5[:, None]).to(tl.bfloat16)
+     kv_5 = tl.where(valid_2d, kv_5, 0.0)
+-    qk += tl.dot(q_5, tl.trans(kv_5)).to(tl.float32)
++    qk += _kdot(q_5, tl.trans(kv_5)).to(tl.float32)
+ 
+-    nope_fp8_6 = nope_uint8_6.to(_KV_FP8_TY, bitcast=True)
++    nope_fp8_6 = _kv_fp8(nope_uint8_6)
+     kv_6 = (nope_fp8_6.to(tl.bfloat16) * scale_bf16_6[:, None]).to(tl.bfloat16)
+     kv_6 = tl.where(valid_2d, kv_6, 0.0)
+-    qk += tl.dot(q_6, tl.trans(kv_6)).to(tl.float32)
++    qk += _kdot(q_6, tl.trans(kv_6)).to(tl.float32)
+ 
+     kv_7 = (rope_lo | (rope_hi << 8)).to(tl.bfloat16, bitcast=True)
+     kv_7 = tl.where(valid_2d, kv_7, 0.0)
+-    qk += tl.dot(q_7, tl.trans(kv_7)).to(tl.float32)
++    qk += _kdot(q_7, tl.trans(kv_7)).to(tl.float32)
+ 
+     qk = qk * sm_scale
+     qk = tl.where(valid[None, :], qk, NEG_INF)
+@@ -268,14 +295,14 @@
+     l_new = alpha * l_i + tl.sum(p, axis=1)
+     p_bf16 = p.to(tl.bfloat16)
+ 
+-    acc_0 = acc_0 * alpha[:, None] + tl.dot(p_bf16, kv_0).to(tl.float32)
+-    acc_1 = acc_1 * alpha[:, None] + tl.dot(p_bf16, kv_1).to(tl.float32)
+-    acc_2 = acc_2 * alpha[:, None] + tl.dot(p_bf16, kv_2).to(tl.float32)
+-    acc_3 = acc_3 * alpha[:, None] + tl.dot(p_bf16, kv_3).to(tl.float32)
+-    acc_4 = acc_4 * alpha[:, None] + tl.dot(p_bf16, kv_4).to(tl.float32)
+-    acc_5 = acc_5 * alpha[:, None] + tl.dot(p_bf16, kv_5).to(tl.float32)
+-    acc_6 = acc_6 * alpha[:, None] + tl.dot(p_bf16, kv_6).to(tl.float32)
+-    acc_7 = acc_7 * alpha[:, None] + tl.dot(p_bf16, kv_7).to(tl.float32)
++    acc_0 = acc_0 * alpha[:, None] + _kdot(p_bf16, kv_0).to(tl.float32)
++    acc_1 = acc_1 * alpha[:, None] + _kdot(p_bf16, kv_1).to(tl.float32)
++    acc_2 = acc_2 * alpha[:, None] + _kdot(p_bf16, kv_2).to(tl.float32)
++    acc_3 = acc_3 * alpha[:, None] + _kdot(p_bf16, kv_3).to(tl.float32)
++    acc_4 = acc_4 * alpha[:, None] + _kdot(p_bf16, kv_4).to(tl.float32)
++    acc_5 = acc_5 * alpha[:, None] + _kdot(p_bf16, kv_5).to(tl.float32)
++    acc_6 = acc_6 * alpha[:, None] + _kdot(p_bf16, kv_6).to(tl.float32)
++    acc_7 = acc_7 * alpha[:, None] + _kdot(p_bf16, kv_7).to(tl.float32)
+ 
+     return acc_0, acc_1, acc_2, acc_3, acc_4, acc_5, acc_6, acc_7, m_new, l_new
+ 
+diff -ruN a/python/sglang/kernels/ops/gemm/bf16_fp32.py b/python/sglang/kernels/ops/gemm/bf16_fp32.py
+--- a/python/sglang/kernels/ops/gemm/bf16_fp32.py
++++ b/python/sglang/kernels/ops/gemm/bf16_fp32.py
+@@ -134,12 +134,19 @@
+     )
+ 
+ 
++_PRE_SM80 = bool(torch.cuda.is_available() and torch.version.hip is None and torch.cuda.get_device_capability() < (8, 0))
++
++
+ def linear_bf16_fp32(
+     x: torch.Tensor,
+     y: torch.Tensor,
+     *,
+     hpc_kernel_min_m: Optional[int] = None,
+ ) -> torch.Tensor:
++    if _PRE_SM80:
++        # cuBLAS has no bf16-in / fp32-out GEMM below SM80: fp32 operands (bf16 values and their
++        # products are exact in fp32; only the order of the sums differs)
++        return torch.nn.functional.linear(x.float(), y.float())
+     if hpc_kernel_min_m is not None:
+         output = _linear_bf16_fp32_hpc(x, y, min_m=hpc_kernel_min_m)
+         if output is not None:
+diff -ruN a/python/sglang/srt/layers/attention/deepseek_v4_backend.py b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
+--- a/python/sglang/srt/layers/attention/deepseek_v4_backend.py
++++ b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
+@@ -210,7 +210,8 @@
+ def _use_sm89_sparse_attention() -> bool:
+     # Ada has BF16 tensor cores, but cannot run FlashMLA's SM90+ kernels.
+     # Match the runtime platform exactly; native SM90/SM100/SM120 paths stay intact.
+-    return _is_cuda and get_platform().device_capability == (8, 9)
++    # Turing too (the Triton kernels open FP8 and dot in fp32 there)
++    return _is_cuda and get_platform().device_capability in ((8, 9), (7, 5))
+ 
+ 
+ def _create_flashmla_metadata():
+diff -ruN a/python/sglang/srt/layers/kt_sm75_ops.py b/python/sglang/srt/layers/kt_sm75_ops.py
+--- /dev/null
++++ b/python/sglang/srt/layers/kt_sm75_ops.py
+@@ -0,0 +1,136 @@
++"""sgl-kernel's CUDA ops that DeepSeek V4 GGUF serving calls, built for GPUs older than the sgl-kernel wheel's arches.
++
++The sgl-kernel wheel carries sm_80 and newer code only (no PTX), so on Turing (SM75) its ops fail with "no kernel
++image". The same sources (python/sglang/kernels/aot/csrc) are built here with torch's JIT loader for the GPU's own
++arch and registered as the sgl_kernel ops' CUDA kernels in their place; the Python call sites stay as they are.
++Nothing is built or registered on SM80 and newer.
++"""
++
++import logging
++import os
++import re
++from pathlib import Path
++
++import torch
++
++logger = logging.getLogger(__name__)
++
++_AOT = Path(__file__).resolve().parents[2] / "kernels" / "aot"
++_SOURCES = (
++    "csrc/quantization/gguf/gguf_kernel.cu",
++    "csrc/elementwise/activation.cu",
++    "csrc/elementwise/pos_enc.cu",
++    "csrc/moe/moe_sum.cu",
++    "csrc/moe/moe_topk_sigmoid_kernels.cu",
++    "csrc/moe/moe_topk_softmax_kernels.cu",
++)
++_OPS = (
++    "silu_and_mul",
++    "gelu_and_mul",
++    "rotary_embedding",
++    "topk_softmax",
++    "topk_sigmoid",
++    "moe_sum",
++    "ggml_dequantize",
++    "ggml_mul_mat_vec_a8",
++    "ggml_mul_mat_a8",
++    "ggml_moe_a8",
++    "ggml_moe_a8_vec",
++)
++_BIND = """#include <torch/all.h>
++#include <torch/library.h>
++#include "sgl_kernel_ops.h"
++
++TORCH_LIBRARY_IMPL(sgl_kernel, CUDA, m) {
++%s
++}
++""" % "\n".join(f'  m.impl("{op}", &{op});' for op in _OPS)
++
++_loaded = False
++
++
++def needed() -> bool:
++    return (
++        torch.cuda.is_available()
++        and torch.version.hip is None
++        and torch.cuda.get_device_capability() < (8, 0)
++        and os.environ.get("KT_SM75_OPS", "1") == "1"
++    )
++
++
++def _load():
++    from torch.utils.cpp_extension import _get_build_directory, load
++
++    import sgl_kernel  # noqa: F401  (the op schemas this registers kernels for)
++
++    major, minor = torch.cuda.get_device_capability()
++    arch = f"{major}{minor}"
++    name = f"kt_sm75_ops_sm{arch}"
++    build = Path(_get_build_directory(name, verbose=False))
++    bind = build / "bind.cc"
++    if not bind.exists() or bind.read_text() != _BIND:
++        bind.write_text(_BIND)
++    try:
++        import flashinfer
++
++        fi_include = [str(Path(flashinfer.__file__).parent / "data" / "include")]
++    except Exception:
++        fi_include = []
++    sources = [str(bind)]
++    for s in _SOURCES:
++        if s.endswith("activation.cu"):
++            # the installed FlashInfer's act_and_mul_kernel takes its vector width as a third template argument and
++            # is bounded to 256 threads a block (sgl-kernel's wheel was built against one without either): a copy
++            # with the width the old kernel used and blocks of at most 256 (the kernel strides over the row)
++            text = re.sub(
++                r"flashinfer::activation::act_and_mul_kernel<c_type, (\w+)>",
++                r"flashinfer::activation::act_and_mul_kernel<c_type, \1, 16 / sizeof(c_type)>",
++                (_AOT / s).read_text(),
++            ).replace("std::min(d / vec_size, 1024U)", "std::min(d / vec_size, 256U)")
++            copy = build / "activation.cu"
++            if not copy.exists() or copy.read_text() != text:
++                copy.write_text(text)
++            sources.append(str(copy))
++        else:
++            sources.append(str(_AOT / s))
++    return load(
++        name=name,
++        sources=sources,
++        extra_include_paths=[
++            str(_AOT / "include"),
++            str(_AOT / "csrc"),
++            str(_AOT / "csrc" / "quantization" / "gguf"),
++            str(_AOT / "csrc" / "moe"),
++        ]
++        + fi_include,
++        extra_cflags=["-O3", "-std=c++20"],
++        extra_cuda_cflags=[
++            "-O3",
++            "-std=c++20",
++            f"-gencode=arch=compute_{arch},code=sm_{arch}",
++            "--expt-relaxed-constexpr",
++            "--expt-extended-lambda",
++            # as sgl-kernel's own build (its CMakeLists): the fp16 / bf16 dispatch, and the half / bf16 conversions
++            # torch's JIT turns off
++            "-DNDEBUG",
++            "-DFLASHINFER_ENABLE_F16",
++            "-DFLASHINFER_ENABLE_BF16",
++            "-U__CUDA_NO_HALF_OPERATORS__",
++            "-U__CUDA_NO_HALF_CONVERSIONS__",
++            "-U__CUDA_NO_HALF2_OPERATORS__",
++            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
++            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
++        ],
++        is_python_module=False,  # the library only registers kernels for the sgl_kernel ops
++        verbose=os.environ.get("KT_SM75_OPS_VERBOSE") == "1",
++    )
++
++
++def load_if_needed() -> None:
++    """Build (once, cached in torch's extensions directory) and register the kernels when the GPU needs them."""
++    global _loaded
++    if _loaded or not needed():
++        return
++    _load()
++    _loaded = True
++    logger.info("sgl-kernel ops built for sm_%d%d: %s", *torch.cuda.get_device_capability(), ", ".join(_OPS))
 diff -ruN a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
 --- a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
 +++ b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
@@ -28404,6 +28733,83 @@ diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/la
      # enable MMVQ in contiguous batching with batch_size=1
      if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
          y = ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
+@@ -375,6 +392,48 @@
+     return out_hidden_states
+ 
+ 
++# Q5_K embedding rows in float32, in gguf-py's order of operations
++_QK_K = 256
++Q5_K_BLOCK = 176  # d (f16), dmin (f16), scales[12], qh[32], qs[128]
++_SHIFTS = {}
++
++
++def _shifts(device):
++    # made once a device: a tensor built inside a CUDA graph capture would be a host copy
++    if device not in _SHIFTS:
++        _SHIFTS[device] = (
++            torch.tensor([0, 4], dtype=torch.uint8, device=device).view(1, 1, 1, 2, 1),
++            torch.arange(8, dtype=torch.uint8, device=device).view(1, 1, 8, 1),
++        )
++    return _SHIFTS[device]
++
++
++def q5k_rows_f32(raw: torch.Tensor) -> torch.Tensor:
++    """Q5_K rows (uint8 [n, blocks * 176]) to float32 [n, blocks * 256], in gguf-py's order of operations
++    ((d * sc) * q - dmin * m, each a separate float32 op), so the values equal its dequantize."""
++    n = raw.shape[0]
++    b = raw.reshape(n, -1, Q5_K_BLOCK)
++    nb = b.shape[1]
++    d = b[..., 0:2].contiguous().view(torch.float16).float()  # [n, nb, 1]
++    dmin = b[..., 2:4].contiguous().view(torch.float16).float()
++    s = b[..., 4:16].reshape(n, nb, 3, 4)
++    s_d, s_m, s_md = s[:, :, 0], s[:, :, 1], s[:, :, 2]
++    sc = torch.cat([s_d & 0x3F, (s_md & 0x0F) | ((s_d >> 2) & 0x30)], dim=-1)  # [n, nb, 8]
++    mn = torch.cat([s_m & 0x3F, (s_md >> 4) | ((s_m >> 2) & 0x30)], dim=-1)
++    dd = (d * sc.float()).unsqueeze(-1)  # [n, nb, 8, 1]
++    dm = (dmin * mn.float()).unsqueeze(-1)
++    qh = b[..., 16:48]  # [n, nb, 32]
++    qs = b[..., 48:176].reshape(n, nb, 4, 32)  # 4 groups of 32 bytes, two sub-blocks each
++    shifts4, shifts8 = _shifts(raw.device)
++    ql = ((qs.unsqueeze(3) >> shifts4) & 0x0F).reshape(n, nb, 8, 32)
++    qhb = (qh.unsqueeze(2) >> shifts8) & 0x01  # [n, nb, 8, 32]
++    q = (ql | (qhb << 4)).float()
++    return (dd * q - dm).reshape(n, nb * _QK_K)
++
++
++_Q5K_ROWS_A_STEP = 4096
++
++
+ def apply_gguf_embedding(
+     x: torch.Tensor,
+     qweight: torch.Tensor,
+@@ -384,6 +443,14 @@
+ ) -> torch.Tensor:
+     if qweight_type in UNQUANTIZED_TYPES:
+         return torch.embedding(qweight, x)
++    elif qweight_type == WeightType.Q5_K:
++        # float32 rows as gguf-py opens them, in steps (a prefill's lookups)
++        x_flat = x.flatten()
++        out = torch.empty(x_flat.shape[0], hidden_size, dtype=dtype or torch.bfloat16, device=qweight.device)
++        for r0 in range(0, x_flat.shape[0], _Q5K_ROWS_A_STEP):
++            ids = x_flat[r0 : r0 + _Q5K_ROWS_A_STEP]
++            out[r0 : r0 + ids.shape[0]] = q5k_rows_f32(torch.index_select(qweight, 0, ids))
++        return out.view(*x.shape, hidden_size)
+     elif qweight_type in DEQUANT_TYPES:
+         block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
+         x_flat = x.flatten()
+@@ -398,6 +465,12 @@
+         raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
+ 
+ 
++# sgl-kernel's ops built for GPUs older than the wheel's arches (nothing on SM80 and newer)
++from sglang.srt.layers import kt_sm75_ops as _kt_sm75_ops  # noqa: E402
++
++_kt_sm75_ops.load_if_needed()
++
++
+ class GGUFLinearMethod(LinearMethodBase):
+     """Linear method for GGUF.
+ 
 diff -ruN a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
 --- a/python/sglang/srt/model_executor/model_runner.py
 +++ b/python/sglang/srt/model_executor/model_runner.py
@@ -28417,6 +28823,19 @@ diff -ruN a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt
              output = self._forward_raw(
                  forward_batch,
                  pp_proxy_tensors,
+diff -ruN a/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py b/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py
+--- a/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py
++++ b/python/sglang/srt/model_executor/model_runner_components/load_model_utils.py
+@@ -80,7 +80,8 @@
+ 
+ 
+ def maybe_downgrade_dtype_for_legacy_gpu(*, model_config: ModelConfig) -> None:
+-    if torch.cuda.get_device_capability()[0] < 8:
++    # KT_SM75_BF16=1 keeps bf16 (DSV4's JIT kernels take bf16, not fp16)
++    if torch.cuda.get_device_capability()[0] < 8 and os.environ.get("KT_SM75_BF16") != "1":
+         logger.info(
+             "Compute capability below sm80. Use float16 due to lack of bfloat16 support."
+         )
 diff -ruN a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_loader/loader.py
 --- a/python/sglang/srt/model_loader/loader.py
 +++ b/python/sglang/srt/model_loader/loader.py
@@ -28445,7 +28864,34 @@ diff -ruN a/python/sglang/srt/model_loader/loader.py b/python/sglang/srt/model_l
 diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/deepseek_v4.py
 --- a/python/sglang/srt/models/deepseek_v4.py
 +++ b/python/sglang/srt/models/deepseek_v4.py
-@@ -886,6 +886,23 @@
+@@ -847,6 +847,26 @@
+ ] = {}
+ 
+ 
++_SERVED_ROWS = {}
++
++
++def _served_rows(table: torch.Tensor, key) -> torch.Tensor:
++    """The first context_length rows of a per-position table (one copy for the
++    layers that share a table); the whole table when the served context is not known or not shorter."""
++    try:
++        from sglang.srt.runtime_context import get_server_args
++
++        n = int(get_server_args().context_length or 0)
++    except Exception:
++        n = 0
++    if n <= 0 or n >= table.shape[0]:
++        return table
++    key = (key, n)
++    if key not in _SERVED_ROWS:
++        _SERVED_ROWS[key] = table[:n].clone()
++    return _SERVED_ROWS[key]
++
++
+ def _freqs_cis_to_cos_sin(
+     freqs_cis: torch.Tensor, dtype: torch.dtype, device: torch.device
+ ) -> Tuple[torch.Tensor, torch.Tensor]:
+@@ -886,6 +906,23 @@
      return out
  
  
@@ -28469,7 +28915,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
  def _apply_gguf_grouped_wo_a(
      o: torch.Tensor,
      qweight: torch.Tensor,
-@@ -897,6 +914,26 @@
+@@ -897,6 +934,26 @@
          from sglang.srt.layers.quantization.gguf import fused_mul_mat_gguf
  
          matmul_fn = fused_mul_mat_gguf
@@ -28496,7 +28942,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
  
      group_outputs = []
      for group_id in range(o.shape[1]):
-@@ -1228,7 +1265,7 @@
+@@ -1228,7 +1285,7 @@
          quantize_wo_a = fp8 or self.use_npu_arch35_mxfp8_wo_a
          if wo_a_keeps_quant_config is None:
              keep_source_quant = (
@@ -28505,3 +28951,34 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
              )
              wo_a_quant_config: Optional[QuantizationConfig] = (
                  quant_config if quantize_wo_a or keep_source_quant else None
+@@ -1367,7 +1424,10 @@
+             beta_fast=scaling.get("beta_fast", 32),
+             beta_slow=scaling.get("beta_slow", 1),
+         )
+-        freqs_cis = precompute_freqs_cis(**self.rope_kwargs)
++        # the cached full table is not kept
++        freqs_cis = _served_rows(
++            precompute_freqs_cis.__wrapped__(**self.rope_kwargs), ("freqs_cis", tuple(sorted(self.rope_kwargs.items())))
++        )
+         self.register_buffer("freqs_cis", freqs_cis, persistent=False)
+         self.freqs_cis: torch.Tensor
+ 
+@@ -1576,6 +1636,9 @@
+             is_neox_style=False,
+             device=get_device().device,
+         )
++        if isinstance(getattr(self.rotary_emb, "cos_sin_cache", None), torch.Tensor):
++            # the served context's rows only, as freqs_cis
++            self.rotary_emb.cos_sin_cache = _served_rows(self.rotary_emb.cos_sin_cache, ("cos_sin", id(self.rotary_emb)))
+ 
+         if _is_npu:
+             rope = Dsv4NpuRoPE.for_freqs(
+@@ -3956,7 +4019,7 @@
+         if self.pp_group.is_first_rank:
+             embedding_quant_config = (
+                 quant_config
+-                if quant_config is not None and quant_config.get_name() == "expert_pack"
++                if quant_config is not None and quant_config.get_name() in ("expert_pack", "gguf")
+                 else None
+             )
+             self.embed_tokens = VocabParallelEmbedding(
