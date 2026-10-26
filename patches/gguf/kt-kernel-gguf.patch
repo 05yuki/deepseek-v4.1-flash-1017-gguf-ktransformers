@@ -6,7 +6,7 @@ diff -ruN a/kt-kernel/cpu_backend/worker_pool.cpp b/kt-kernel/cpu_backend/worker
  void NumaJobDistributor::worker_thread(int numa_id) {
    auto start = std::chrono::high_resolution_clock::now();
 -  set_memory_to_numa(numa_id);
-+  // kt-kernel-numa-distributor-membind.py: numa_id is the subpool's index; its memory goes on the subpool's node
++  // numa_id is the subpool's index; its memory goes on the subpool's node
 +  set_memory_to_numa(numa_ids[numa_id]);
    status[numa_id] =
        std::move(std::unique_ptr<std::atomic<ThreadStatus>>(new std::atomic<ThreadStatus>(ThreadStatus::WAITING)));
@@ -18,7 +18,7 @@ diff -ruN a/kt-kernel/ext_bindings.cpp b/kt-kernel/ext_bindings.cpp
  
    // kt-kernel-live-knobs.py
    m.def("set_knob", [](const std::string& name, int value) { kt_knob_set(name, value); });
-+  // kt-kernel-llamafile-expert-cache-peek.py: the GGUF expert cache's resident experts for an outside reader
++  // the GGUF expert cache's resident experts for an outside reader
 +  m.def("kt_gguf_cache_peek", [](int layer, int expert) -> py::object {
 +    uintptr_t o[3];
 +    if (!kt_gguf_cache_peek((uint64_t)layer, (int64_t)expert, o)) return py::none();
@@ -32,7 +32,7 @@ diff -ruN a/kt-kernel/operators/llamafile/kt_iq1mt.hpp b/kt-kernel/operators/lla
 --- /dev/null
 +++ b/kt-kernel/operators/llamafile/kt_iq1mt.hpp
 @@ -0,0 +1,661 @@
-+// kt_iq1mt.hpp (kt-kernel-iq1m-repack.py): IQ1_M experts repacked for the CPU decode, and their GEMM.
++// kt_iq1mt.hpp: IQ1_M experts repacked for the CPU decode, and their GEMM.
 +//
 +// iqk's mul_mat_iq1_m_q8_K builds each 8-value group from iq1s_grid with a scalar index and a 64-bit table load,
 +// 32 a block: on Zen 2 that, not memory, bounds it (28 threads read 28 GB/s of IQ1_M weights). The expert cache
@@ -721,7 +721,7 @@ diff -ruN a/kt-kernel/operators/llamafile/moe.hpp b/kt-kernel/operators/llamafil
  #include "llama.cpp/ggml-quants.h"
  #include "llama.cpp/ggml.h"
  #include "llamafile/sgemm.h"
-+#include "kt_iq1mt.hpp"  // kt-kernel-iq1m-repack.py
++#include "kt_iq1mt.hpp"
  
  inline void debug_quant(void* input, ggml_type type) {
    std::vector<float> output(ggml_blck_size(type));
@@ -768,7 +768,7 @@ diff -ruN a/kt-kernel/operators/llamafile/moe.hpp b/kt-kernel/operators/llamafil
 +  return *r;
 +}
 +
-+// KT_GGUF_EXPERT_CACHE_GIB: kt-kernel's own RAM tier for GGUF experts (see kt-kernel-llamafile-expert-cache.py)
++// KT_GGUF_EXPERT_CACHE_GIB: kt-kernel's own RAM tier for GGUF experts
 +struct KtJobs {
 +  std::mutex mu;
 +  std::condition_variable cv, done;
@@ -848,20 +848,20 @@ diff -ruN a/kt-kernel/operators/llamafile/moe.hpp b/kt-kernel/operators/llamafil
 +    size_t bytes = 0;
 +    int pins = 0;
 +    uint8_t* slot = nullptr;  // its slab slot (the three tensors carved from it), or malloc'd tensors
-+    size_t slot_cls = 0;      // kt-kernel-iq1m-repack.py: the slot's size class (0: the fixed slab)
-+    uint8_t rep = 0;          // kt-kernel-iq1m-repack.py: bit t set when tensor t has a repacked copy (kt_iq1mt)
-+    uint8_t* tdata[3] = {nullptr, nullptr, nullptr};  // kt-kernel-iq1m-repack.py: the repacked copies
++    size_t slot_cls = 0;      // the slot's size class (0: the fixed slab)
++    uint8_t rep = 0;          // bit t set when tensor t has a repacked copy (kt_iq1mt)
++    uint8_t* tdata[3] = {nullptr, nullptr, nullptr};  // the repacked copies
 +    std::shared_ptr<std::atomic<int>> left;  // pieces of its reads not done yet (asynchronous acquire)
 +    std::list<uint64_t>::iterator at;
 +  };
 +  std::unordered_map<uint64_t, Entry> map;
 +  std::list<uint64_t> lru;  // front = most recent
 +  std::vector<Entry> transient;  // a wide forward's misses: read for it alone, freed at its end
-+  // KT_GGUF_CACHE_SLOT_MIB: cached entries in fixed slots, 64 slots a block (kt-kernel-llamafile-expert-cache-slab.py)
++  // KT_GGUF_CACHE_SLOT_MIB: cached entries in fixed slots, 64 slots a block
 +  size_t slot_bytes = 0;
 +  std::vector<uint8_t*> slab_free;
 +  size_t slab_slots = 0;
-+  // kt-kernel-iq1m-repack.py: KT_GGUF_CACHE_IQ1M_T=1 repacks IQ1_M tensors; their entries are larger than the
++  // KT_GGUF_CACHE_IQ1M_T=1 repacks IQ1_M tensors; their entries are larger than the
 +  // others, so slots come in size classes of 64 KiB steps, 64 a block
 +  static bool repack_on() {
 +    static const bool on = getenv("KT_GGUF_CACHE_IQ1M_T") != nullptr && getenv("KT_GGUF_CACHE_IQ1M_T")[0] == '1';
@@ -991,7 +991,7 @@ diff -ruN a/kt-kernel/operators/llamafile/moe.hpp b/kt-kernel/operators/llamafil
 +    return true;
 +  }
 +
-+  // kt-kernel-iq1m-repack.py: an IQ1_M tensor of `rows` rows (n raw bytes) read with O_DIRECT into a scratch buffer
++  // an IQ1_M tensor of `rows` rows (n raw bytes) read with O_DIRECT into a scratch buffer
 +  // a piece of rows at a time: the raw rows go to [at, at + n) and their repacked copy (rows * nb * 76 bytes) to
 +  // tdata, after them (at: the slot, or a fresh buffer for both)
 +  static size_t rep_bytes(size_t n, int rows) {
@@ -1091,7 +1091,7 @@ diff -ruN a/kt-kernel/operators/llamafile/moe.hpp b/kt-kernel/operators/llamafil
 +      }
 +      if (left) left[i] = nullptr;
 +      if (rep_out) rep_out[i] = 0;
-+      // kt-kernel-iq1m-repack.py: a repacked tensor keeps its raw rows and takes rows * nb * 76 bytes more
++      // a repacked tensor keeps its raw rows and takes rows * nb * 76 bytes more
 +      size_t tb[3];
 +      for (int t = 0; t < 3; ++t)
 +        tb[t] = rep_rows && rep_rows[t] > 0 ? ((bytes[t] + 4095) & ~size_t(4095)) + rep_bytes(bytes[t], rep_rows[t]) : bytes[t];
@@ -1175,7 +1175,7 @@ diff -ruN a/kt-kernel/operators/llamafile/moe.hpp b/kt-kernel/operators/llamafil
 +            read_bytes.load() / std::max(1.0, (double)read_ns.load()));
 +  }
 +};
-+// kt-kernel-llamafile-expert-cache-peek.py: a resident expert's tensors for a reader outside kt-kernel
++// a resident expert's tensors for a reader outside kt-kernel
 +// (the streamed prefill), pinned until kt_gguf_cache_unpin; 0 when absent or still being read
 +inline int kt_gguf_cache_peek(uint64_t layer_key, int64_t id, uintptr_t out[3]);
 +inline void kt_gguf_cache_unpin(uint64_t layer_key, int64_t id);
@@ -1258,7 +1258,7 @@ diff -ruN a/kt-kernel/operators/llamafile/moe.hpp b/kt-kernel/operators/llamafil
 +    return kt_cache_on_ ? kt_down_ptr_[e]
 +                        : m_local_down_proj_ + (size_t)e * kt_bytes(config_.down_type, config_.hidden_size, config_.intermediate_size);
 +  }
-+  // kt-kernel-iq1m-repack.py: bit t of kt_rep_[e]: the cache holds expert e's tensor t repacked (kt_iq1mt)
++  // bit t of kt_rep_[e]: the cache holds expert e's tensor t repacked (kt_iq1mt)
 +  std::vector<uint8_t> kt_rep_;
 +  bool kt_rep(int64_t e, int t) const { return kt_cache_on_ && !kt_rep_.empty() && ((kt_rep_[e] >> t) & 1); }
 +  int kt_type(int t) const { return t == 0 ? config_.gate_type : t == 1 ? config_.up_type : config_.down_type; }
@@ -1374,7 +1374,7 @@ diff -ruN a/kt-kernel/operators/llamafile/moe.hpp b/kt-kernel/operators/llamafil
 +      const int64_t e = kt_acquired_[i];
 +      src[i] = {m_local_gate_proj_ + (size_t)e * gb, m_local_up_proj_ + (size_t)e * ub, m_local_down_proj_ + (size_t)e * db};
 +    }
-+    // kt-kernel-iq1m-repack.py: the IQ1_M tensors repacked as they are read (KT_GGUF_CACHE_IQ1M_T=1)
++    // the IQ1_M tensors repacked as they are read (KT_GGUF_CACHE_IQ1M_T=1)
 +    const bool rp = KtExpertCache::repack_on();
 +    const int rep_rows[3] = {rp && config_.gate_type == GGML_TYPE_IQ1_M ? (int)config_.intermediate_size : 0,
 +                             rp && config_.up_type == GGML_TYPE_IQ1_M ? (int)config_.intermediate_size : 0,

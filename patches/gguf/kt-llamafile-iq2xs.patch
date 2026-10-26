@@ -6,7 +6,7 @@ diff -ruN a/third_party/llamafile/iqk_mul_mat.inc b/third_party/llamafile/iqk_mu
  };
  
 +
-+// IQ2_XS (ik_llama.cpp iqk_gemm_iquants.cpp, x86; kt-kernel-iqk-iq2xs.py)
++// IQ2_XS (ik_llama.cpp iqk_gemm_iquants.cpp, x86)
 +#ifndef MM256_SET1_M128I
 +#define MM256_SET1_M128I(a) _mm256_broadcastsi128_si256(a)
 +#endif
@@ -176,7 +176,7 @@ diff -ruN a/third_party/llamafile/iqk_mul_mat.inc b/third_party/llamafile/iqk_mu
 +#ifndef MM256_SET1_M128I
 +#define MM256_SET1_M128I(a) _mm256_broadcastsi128_si256(a)
 +#endif
-+// IQ1_M x Q8_K (ik_llama.cpp iqk_gemm_1bit.cpp, AVX2; kt-kernel-iqk-iq1m.py)
++// IQ1_M x Q8_K (ik_llama.cpp iqk_gemm_1bit.cpp, AVX2)
 +template <int nrc_y>
 +static void mul_mat_iq1_m_q8_K(int n, const void * vx, size_t bx, const DataInfo& info, int nrc_x) {
 +    GGML_ASSERT(n%QK_K == 0);
