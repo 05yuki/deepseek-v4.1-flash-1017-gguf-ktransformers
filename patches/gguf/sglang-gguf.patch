@@ -27663,7 +27663,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +parent's; IQ1_S / IQ1_M / IQ2_XXS / IQ2_XS, which kt_gguf_dequant.py's Triton kernels do not cover, are
 +dequantized with sgl_kernel.ggml_dequantize (matches gguf-py's reference to bf16 rounding, 10-24).
 +
-+Rates measured on dual-epyc 10-24 (one SN5100-class NVMe, one 16 GB SM120 card): NVMe 5.2-6.3 GB/s with 4-8
++Rates measured with one SN5100-class NVMe and one 16 GB SM120 card: NVMe 5.2-6.3 GB/s with 4-8
 +parallel sequential streams, pinned H2D 27.9 GB/s, sgl_kernel IQ1_M dequant 65 GB/s of raw bytes, bf16 GEMM 9.2
 +TFLOPS: a 6144-token chunk is bound by the NVMe read of the layer's experts (~2.97 GB a layer, ~20 s a chunk),
 +a 12288-token chunk by the GEMMs.
