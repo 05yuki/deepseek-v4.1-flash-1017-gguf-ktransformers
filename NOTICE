@@ -1,4 +1,4 @@
-deepseek-v4.1-flash-1017-ktransformers
+deepseek-v4.1-flash-1017-gguf-ktransformers
 Copyright 2026 05yuki
 
 Licensed under the Apache License, Version 2.0 (see LICENSE), except as noted below.
@@ -9,5 +9,20 @@ https://github.com/0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000
 (Copyright (c) 2026 0xSero, MIT License); the MIT terms apply to those files, as
 their headers say.
 
-The patches under patches/ modify sgl-project/sglang (commit 8b9f7241) and
+patches/gguf/sglang-gguf.patch adds files copied or derived from llama.cpp
+(https://github.com/ggml-org/llama.cpp, commit 23b0202, Copyright (c) 2023-2026 The
+ggml authors, MIT License): kt_gguf_moe_mmq/llama_mmq/ (the patch carries its LICENSE)
+and kt_gguf_moe_multi/ggml-common.h and vecdotq.cuh. The MIT terms apply to those files.
+
+patches/gguf/kt-llamafile-iq2xs.patch adds an IQ2_XS dequantizer taken from
+ik_llama.cpp (https://github.com/ikawrakow/ik_llama.cpp, iqk_gemm_iquants.cpp,
+Copyright (c) 2023-2024 The ggml authors, Copyright (c) 2023-2024 The llama.cpp
+authors, Copyright (c) 2024-2025 The ik_llama.cpp authors, MIT License); the MIT
+terms apply to that code.
+
+The patches under patches/ modify sgl-project/sglang (commit 65633129) and
 kvcache-ai/ktransformers (kt-kernel, commit 95009ea), both Apache-2.0.
+
+The GGUF weights this setup runs are ISTA-DASLab's
+(https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF, MIT License)
+and are not part of this repository.
