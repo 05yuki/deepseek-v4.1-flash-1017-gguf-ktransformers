@@ -265,7 +265,8 @@ class WrapperTest(unittest.TestCase):
 class LauncherDefaultsTest(unittest.TestCase):
     def test_ada_defaults_preserve_native_devices_and_user_overrides(self):
         launcher = pathlib.Path(__file__).resolve().parents[1] / "serve.sh"
-        blocks = re.findall(r'if \[\[ "\$cap" == "8\.9" \]\]; then\n.*?\nfi',
+        # the GGUF recipe's block also covers Turing (SM75)
+        blocks = re.findall(r'if \[\[ "\$cap" == "8\.9"(?: \|\| "\$cap" == "7\.5")? \]\]; then\n.*?\nfi',
                             launcher.read_text(encoding="utf-8"), re.DOTALL)
         self.assertEqual(len(blocks), 1)
         names = ["SGLANG_OPT_USE_TOPK_V2", "SGLANG_OPT_USE_TILELANG_MHC_PRE",
@@ -274,7 +275,7 @@ class LauncherDefaultsTest(unittest.TestCase):
         script = blocks[0] + "\n" + "\n".join(
             'printf "%s\\n" "${' + name + '-unset}"' for name in names)
         clean = {k: v for k, v in os.environ.items() if k not in names}
-        for cap in ["8.9", "9.0", "10.0", "12.0"]:
+        for cap in ["7.5", "8.9", "9.0", "10.0", "12.0"]:
             for override in [None, "0", "1"]:
                 with self.subTest(cap=cap, override=override):
                     env = dict(clean, cap=cap)
@@ -283,7 +284,7 @@ class LauncherDefaultsTest(unittest.TestCase):
                     got = subprocess.check_output([shutil.which("bash") or "bash", "-c", script], env=env,
                                                   text=True).splitlines()
                     expected = ([override] * 5 if override is not None else
-                                ["0", "0", "0", "1", "unset"] if cap == "8.9" else ["unset"] * 5)
+                                ["0", "0", "0", "1", "unset"] if cap in ("7.5", "8.9") else ["unset"] * 5)
                     self.assertEqual(got, expected)
 
 
