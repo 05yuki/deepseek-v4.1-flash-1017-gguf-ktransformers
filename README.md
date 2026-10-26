@@ -1,10 +1,12 @@
-# DeepSeek-V4.1-Flash-1017 GGUF on SGLang + KTransformers (one GPU, one CPU socket)
+# DeepSeek-V4.1-Flash-1017 GGUF on SGLang + KTransformers (one 16 GB GPU, 64 GB of RAM)
 
 Run [ISTA-DASLab's GSQ-RCO GGUF](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)
 of [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
-on one 16 GB GPU and the CPU socket next to it. The 384 routed experts per layer run on the
-CPU from the GGUF's own rows through [KTransformers](https://github.com/kvcache-ai/ktransformers)'
-kt-kernel (its LLAMAFILE backend), held in RAM as far as the node has room. Attention and the
+on one 16 GB GPU, one CPU socket and 64 GB of RAM, faster with more RAM. The 384 routed experts per
+layer run on the CPU from the GGUF's own rows through [KTransformers](https://github.com/kvcache-ai/ktransformers)'
+kt-kernel (its LLAMAFILE backend): RAM holds as many of them as it has room for, and the rest are read
+from the NVMe drive when the text routes to them, so every GiB of RAM added means fewer reads and a
+faster decode, 1.7 to 2.1 times the 64 GB speed once all of them fit. Attention and the
 dense layers run on the GPU in their GGUF types through [SGLang](https://github.com/sgl-project/sglang),
 and the GPU's free memory holds as many more experts as fit, swapped for what the text routes to.
 The prefill streams the experts to the GPU and multiplies them there with llama.cpp's MMQ kernels.
@@ -40,9 +42,10 @@ The server speaks SGLang's OpenAI-compatible API on `127.0.0.1:8080`, one reques
   experts do not split across tensor-parallel ranks.
 - **CPU and RAM: the socket the GPU hangs off.** `serve.sh` runs the experts on that NUMA
   node's physical cores and sizes the expert cache from its memory:
-  - the cache holds the experts' GGUF rows (124 GiB for IQ2_XXS) as far as the node has room,
-    less 18 GiB for everything else (`KT_GGUF_HOST_RESERVE_GIB`); what does not fit is read
-    from the file again when it is routed, so decode then waits on the drive;
+  - 64 GB of RAM is enough; more is faster. The cache holds the experts' GGUF rows (124 GiB for
+    IQ2_XXS) as far as the node has room, less 18 GiB for everything else
+    (`KT_GGUF_HOST_RESERVE_GIB`); what does not fit is read from the file again when it is
+    routed, so decode then waits on the drive;
   - when the node holds every expert and the IQ1_M decode copy too (76 GiB more for IQ2_XXS),
     the copy is kept: an IQ1_M layer's CPU decode takes 0.55 ms instead of 0.94 ms on it;
   - a cgroup memory limit counts (`systemd-run --user --scope -p MemoryMax=64G ./serve.sh`
@@ -50,8 +53,9 @@ The server speaks SGLang's OpenAI-compatible API on `127.0.0.1:8080`, one reques
 
   kt-kernel is built for the CPU it is built on; its GGUF kernels need AVX2.
 - **Disk: NVMe, about 260 GB.** The IQ2_XXS build is 138 GB of shards and the 111 GB Engram
-  file. The engram rows are read from the drive in decode, and the prefill streams the experts
-  from it.
+  file. The engram rows are read from the drive in decode, the experts RAM does not hold too,
+  and the prefill streams the experts from it: with less RAM, the drive's speed sets more of
+  the decode.
 - **Software.** Linux, bash 4.4 or newer, the CUDA toolkit (built and run with 13.1), git,
   gcc/g++, the libnuma and hwloc headers (`libnuma-dev libhwloc-dev`), and `uv` or Python 3.12.
   The Python packages are pinned in `requirements.txt`.
@@ -94,54 +98,42 @@ overridden by the variable named next to it. Logs go to `logs/<GGUF dir name>/<t
 
 ## Results
 
-AMD EPYC 7452 (Zen 2, AVX2, one of two sockets: 32 cores, 256 GB DDR4), one RTX 5070 Ti 16 GB, the
-IQ2_XXS build on NVMe; built from this repository and run with the `serve.sh` defaults (131,072-token
-context, one request at a time), measured with `tools/bench.py`, every table from one launch, after
-one warm-up pass of the same prompts (the first pass fills the expert cache from the drive).
+AMD EPYC 7452 (Zen 2, AVX2, one of two sockets: 32 cores, 256 GB DDR4), one RTX 5070 Ti
+16 GB, the IQ2_XXS build on one NVMe drive; built from this repository and run with the
+`serve.sh` defaults (131,072-token context, one request at a time), measured with `tools/bench.py`,
+every column from one launch, after one warm-up pass of the same prompts (the first pass fills the
+expert cache from the drive).
 
-Decode, 1,024 tokens a reply (`--other-text` for the rows below the first):
+The 64 GB column is that socket under a memory limit,
+`systemd-run --user --scope -p MemoryMax=64G -p MemorySwapMax=0 ./serve.sh`, not a 64 GB desktop:
+a desktop's memory and drive will give other numbers. `serve.sh` reads the limit and
+keeps a 46 GiB expert cache, about 37% of the experts (90% of the expert reads hit it). With the
+socket's 251 GiB the cache holds every expert and the IQ1_M decode copy (195 GiB of its 204), and
+the server process uses 220 GB.
 
-| text | tok/s |
-|---|---|
-| Japanese prose (median of four prompts) | 39.9 |
-| Chinese prose | 31.5 |
-| math | 30.3 |
-| English prose | 29.2 |
-| JSON | 28.9 |
-| English technical prose | 27.1 |
-| Python code | 26.7 |
+Decode, 1,024 tokens a reply, tok/s (`--other-text` for the rows below the first):
+
+| text | 64 GB of RAM | 251 GiB (all experts in RAM) |
+|---|---|---|
+| Japanese prose (median of four prompts) | 22.7 | 39.9 |
+| math | 18.1 | 30.3 |
+| Chinese prose | 17.4 | 31.5 |
+| JSON | 17.1 | 28.9 |
+| English prose | 16.2 | 29.2 |
+| English technical prose | 13.0 | 27.1 |
+| Python code | 12.8 | 26.7 |
 
 Prefill, one prompt of random token ids:
 
-| prompt (tokens) | tok/s | time |
+| prompt (tokens) | 64 GB of RAM | 251 GiB |
 |---|---|---|
-| 35,000 | 1,650 | 21 s |
+| 35,000 | 913 tok/s (38 s) | 1,650 tok/s (21 s) |
 
-The node's 251 GiB take the whole IQ2_XXS build: the expert cache holds every expert and the IQ1_M
-decode copy (195 GiB of its 204), and the server process uses 220 GB of the node. Outside prefill
-the hot lend holds 15-16 more experts a layer on the GPU (610-640 slots, in 5 GiB the driver had
-free), swapped for what the text routes to; Japanese prose runs fastest because its routes gather on
-fewer experts, so the slots take more of them.
-
-### 64 GB of RAM
-
-The same launch under `systemd-run --user --scope -p MemoryMax=64G -p MemorySwapMax=0`: `serve.sh`
-reads the limit and keeps a 46 GiB expert cache of raw rows (no IQ1_M copy), about 37% of the experts;
-the rest is read from the drive when it is routed (90% of the expert reads hit the cache).
-
-| text | tok/s |
-|---|---|
-| Japanese prose (median of four prompts) | 22.7 |
-| math | 18.1 |
-| Chinese prose | 17.4 |
-| JSON | 17.1 |
-| English prose | 16.2 |
-| English technical prose | 13.0 |
-| Python code | 12.8 |
-
-| prompt (tokens) | tok/s | time |
-|---|---|---|
-| 35,000 | 913 | 38 s |
+With RAM between the two, the cache holds more of the experts and fewer reads go to the drive; only
+the two ends were measured. Outside prefill the hot lend holds 15-16 more experts a layer on the
+GPU (610-640 slots with all experts in RAM, in 5 GiB the driver had free), swapped for what the text
+routes to; Japanese prose runs fastest because its routes gather on fewer experts, so the slots and
+the cache take more of them.
 
 ## Accuracy
 
