@@ -2,22 +2,28 @@
 
 Run [ISTA-DASLab's GSQ-RCO GGUF](https://huggingface.co/ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF)
 of [deepseek-ai/DeepSeek-V4.1-Flash-1017](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash-1017)
-on one 16 GB GPU, one CPU socket and 64 GB of RAM, faster with more RAM. The 384 routed experts per
-layer run on the CPU from the GGUF's own rows through [KTransformers](https://github.com/kvcache-ai/ktransformers)'
-kt-kernel (its LLAMAFILE backend): RAM holds as many of them as it has room for, and the rest are read
-from the NVMe drive when the text routes to them, so every GiB of RAM added means fewer reads and a
-faster decode, 1.6 to 2.1 times the 64 GB speed once all of them fit. Attention and the
-dense layers run on the GPU in their GGUF types through [SGLang](https://github.com/sgl-project/sglang),
-and the GPU's free memory holds as many more experts as fit, swapped for what the text routes to.
-The prefill streams the experts to the GPU and multiplies them there with llama.cpp's MMQ kernels.
-The engram tables are read from the Engram GGUF on disk.
+with [SGLang](https://github.com/sgl-project/sglang) and [KTransformers](https://github.com/kvcache-ai/ktransformers).
 
-This repository is the GGUF counterpart of
-[deepseek-v4.1-flash-1017-ktransformers](https://github.com/05yuki/deepseek-v4.1-flash-1017-ktransformers)
-(the MXFP4 checkpoint on 512 GB of RAM): the same SGLang and KTransformers changes, plus the GGUF
-ones in `patches/gguf/`. It is a snapshot against SGLang main `66f79f1a` and KTransformers
-`95009ea` (torch 2.14.1 with CUDA 13 wheels, FlashInfer 0.7.2, CUDA toolkit 13.1); later
-upstream versions are not tracked.
+It needs one 16 GB GPU, one CPU socket and 64 GB of RAM.
+
+More RAM makes the decode faster: 1.6 to 2.1 times the 64 GB speed once every expert fits.
+
+Where each part runs:
+
+- **GPU:** attention and the dense layers, in their GGUF types, plus as many experts as its free
+  memory holds.
+- **CPU:** the other routed experts, computed from the GGUF's own rows by kt-kernel.
+- **RAM:** a cache of as many experts as fit; the rest are read from the NVMe drive when the text
+  routes to them.
+- **Prefill:** the experts stream to the GPU and are multiplied there with llama.cpp's MMQ kernels.
+- **Engram tables:** read from the Engram GGUF on disk.
+
+This is the GGUF counterpart of
+[deepseek-v4.1-flash-1017-ktransformers](https://github.com/05yuki/deepseek-v4.1-flash-1017-ktransformers),
+which runs the MXFP4 checkpoint on 512 GB of RAM.
+It carries the same SGLang and KTransformers changes, plus the GGUF ones in `patches/gguf/`.
+It is pinned to SGLang main `66f79f1a` and KTransformers `95009ea` (torch 2.14.1 with CUDA 13
+wheels, FlashInfer 0.7.2, CUDA toolkit 13.1); later upstream versions are not tracked.
 
 ```
 hf download ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF \
