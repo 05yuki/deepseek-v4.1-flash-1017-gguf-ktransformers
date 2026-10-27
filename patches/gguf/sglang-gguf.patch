@@ -1135,9 +1135,11 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_hot.py b/python/sglang/srt/laye
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/SOURCES b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/SOURCES
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/SOURCES
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,44 @@
 +Built from SGLang 5ac69dd29de8f84f747d3c5fc93d23ff064263e9 (perf/gguf-mmq-q2_0),
 +python/sglang/kernels/aot/csrc/quantization/gguf; vendored llama.cpp 23b0202a189c44a54625aadcb37a946dd1d6278d (MIT).
++The dense mul_mat(), mmq-instance-q5_k.cu and patches/0001-mmq-dst-type.patch (applied to ggml/src/ggml-cuda/mmq.cuh)
++from SGLang a7e0e1e877 (perf/gguf-mmq-llamacpp).
 +
 +94f29bbed6a22c35b992c5c6ebf0e7c92f13b836b90f36f461c9cf2f0f1d010d  copied     llama_mmq/ggml/LICENSE
 +a70f952441a03bf2d2e59d4e955abed42d865c183be865775189419d0d84578c  copied     llama_mmq/ggml/LLAMA_CPP_COMMIT
@@ -1152,35 +1154,36 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/SOURCES b/python/sglang
 +4acce516e9463607122f562a9cdab6aa1f25c37f937980701c20075c0149f615  copied     llama_mmq/ggml/src/ggml-cuda/mma.cuh
 +41b1c571da649b80f438e9ee7ded5cebc035cd0003a152ce81fb54462c3cab5b  copied     llama_mmq/ggml/src/ggml-cuda/mmid.cu
 +236962648e49c0faa2d76f505c781e36a99c833b27ff3a871111d9de135803ed  copied     llama_mmq/ggml/src/ggml-cuda/mmid.cuh
-+ccc568f2a16f22b5cf0d0a697e243e459e5feaad4433ce6c252da760ffaff368  copied     llama_mmq/ggml/src/ggml-cuda/mmq.cuh
-+c26965a95a9a836f57c93d9623bb9995b80236ee4b207f759b673f92cc6e9701  copied     llama_mmq/ggml/src/ggml-cuda/mmq-load-tiles.cuh
++037d79d7dae68f003a9003353a1de66f4755da8eb9e552178306371e99ac7556  patched    llama_mmq/ggml/src/ggml-cuda/mmq.cuh
++048cc150a9183af356c90dd5433037156665f3c186a3e8711a9a6c3fa6cd1c66  copied     llama_mmq/ggml/src/ggml-cuda/mmq-load-tiles.cuh
 +c038cf45ca87552e8c7c81f71f8c908c7d07460a55a571522abd562640c692b3  copied     llama_mmq/ggml/src/ggml-cuda/mmq-vec-dot.cuh
 +200dad1a94624716460b019d7f2bb38777d7e1348109a5cc623d03ce69ba275a  copied     llama_mmq/ggml/src/ggml-cuda/vecdotq.cuh
 +e7847065d5d741f892d2f1f7aaaa8f418a41e3b983d1e6f09010055d4d1c38d1  copied     llama_mmq/ggml/src/ggml-cuda/vendors/cuda.h
 +41253e37b9d032e78135d8bcee4544de82e07002530f7045eccf782727c8a784  copied     llama_mmq/ggml/src/ggml-cuda/template-instances/mmq-instance-q2_0.cu
 +b38f4de9a3563debaf4796d6772e1ed72ce6944c2b8b03f9c26bf19191addee7  copied     llama_mmq/ggml/src/ggml-cuda/template-instances/mmq-instance-q8_0.cu
++c98bbe1dd91e03362f4136357c6f4e4e2c5328902fdc6fd857d0f608386ffb2e  copied     llama_mmq/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_k.cu
 +49390056738bb03dea1eee7a31dc36841bdb6cca4e8baa1ac1700b0c6a8163fa  copied     llama_mmq/ggml_shim.cu
-+d93f607f54cb9ec06e1a7a3f575c9aec0b4b9bd66c3e13c6d5625dbfd9885395  copied     llama_mmq/mmq_moe.cu
++4929b22716c567bc704b3b4dc25972fcc22d7a782321cc3817af95095cd37c08  copied     llama_mmq/mmq_moe.cu
 +ee0487fd04967b62dc7982ccf5dd3cc36e91aade945322aac0485c2c7533d55d  copied     llama_mmq/quantize_mmq_q8_1.cu
 +bfb6439d3f4fcc1362f2a2d6f593062e49fd23addfaab508cd967fcddbbb3642  copied     llama_mmq/mmq_internal.cuh
-+954c5d0aa5bee6e20f41dccc2b4de047c5c9433c5239aa9575c87c928eda0881  copied     llama_mmq/sgl_llama_mmq.h
-+6de9336a6c2f65c0ad83cbe9303dcd03e8cbb6185d15346133a31421000f6408  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-ampere.cuh
++bb1319d5fae449a3c9f6317370ffc04cb5a2d8def2f4176419a3bb07f1ae23d0  patched    llama_mmq/sgl_llama_mmq.h
++c5c823e15cf7854864ab1050323aabc61a9458eba912d22b6ef72e1ab03f7c57  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-ampere.cuh
 +8bec1e65a3a2a58fab1f406225f6ba2f1a4c38a19793dfa255baff69bc044d70  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-blackwell.cuh
-+314eeb8453834723d5224012f692f70673f86ecc42d2b6d6f2005a0fad124dbc  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-cdna.cuh
-+f669a723fc19d1e650de33a2852a10472a5773b0c8a3cd5b96662bc4fe6ebfe3  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-gcn.cuh
-+67a93b6d26d3e16e77fd285dd77e7cca7848fb0b0d68897c2ff1e8cc47102263  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-pascal-dp4a.cuh
-+48bae44f1f0e667fa02fb898859eb18c03961bdbadf53c1e22d98801ed70affe  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-pascal-older.cuh
-+758be2a33b89018841f432c15cd63009ad212d71eae888a04b4535cb64941aa7  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-rdna2.cuh
-+5243cb07aded29b0bd3254cf9f9856989f53b133a73874388282a35c3990f0cd  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-rdna3-5.cuh
-+a1ac4f4fa799f2fb200ead23f3403bb0f729d41109b8967c6d76216768aae0cf  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-rdna3.cuh
-+e40c9c5fe85607db07ae351dd6ca13c92caaa238e2a62d5134877d9fbcb5c645  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-rdna4.cuh
-+e638340b0d6d0404708735058b206f09a4894e6bdb9996bd1f39a117242eff6a  generated  llama_mmq/mmq_types.cu
-+6beb7fb80a7ec18d9ba6004d6240ff9c8bb0022648d559c70ae6fcc842271b57  generated  kt_gguf_moe_mmq.cu
-+f4d7777ba613d674acbe2ba9794d5714148d82c975f0e2632796808eda6d1c56  generated  kt_gguf_moe_mmq_bind.cpp
++40c6f389f1ac7eb94cb8af8a7272e411621fbe8f90efeef7e6e0f01d4ea5f0fb  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-cdna.cuh
++ed5b03f2127b68d9843153386d626321a60f2b12b7fe6f2a782f0842d11233f3  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-gcn.cuh
++1e50f99362ae4387392a22a22c0f44ae6b799216c610f162eb61d4bc6e398594  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-pascal-dp4a.cuh
++0b7d22a449c1580695262382057bd2f9476ecfe9f03101250c29355a811089d9  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-pascal-older.cuh
++1ba0d34fed74584b42cd7e0e9f90db0ba1fa941c2994f37440372f82b25ccbbb  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-rdna2.cuh
++07530c886807c128535688fddd47e905d46d10146ad5095ced042afeecb9e23b  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-rdna3-5.cuh
++9239cdf31e0f881d373426738b3e43d3917b394d4f3d69b71a76eabf13542fb5  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-rdna3.cuh
++40121b90d558241ad622a6eb1ea876d6ba68216068c43163d8213f661544bc36  copied     llama_mmq/ggml/src/ggml-cuda/mmq-config-rdna4.cuh
++142ea965cfe14479f08304bce240f758e283a4d2ee2c3276ddd16fe4cdb5cc68  generated  llama_mmq/mmq_types.cu
++412899691869feeb44b06fef45b852e2e3923290f6fd0236469f47800116fee3  generated  kt_gguf_moe_mmq.cu
++2ff515f884cc74faccef7f697bd1335c3fc2e3fbd433d081f4094a48e35fbdae  generated  kt_gguf_moe_mmq_bind.cpp
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/kt_gguf_moe_mmq.cu b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/kt_gguf_moe_mmq.cu
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/kt_gguf_moe_mmq.cu
-@@ -0,0 +1,227 @@
+@@ -0,0 +1,284 @@
 +// Generated from gguf_kernel.cu of SGLang 5ac69dd
 +// (branch perf/gguf-mmq-q2_0): ggml_moe_mmq, llama.cpp's MUL_MAT_ID MMQ on raw GGUF expert blocks
 +// (llama_mmq/, llama.cpp 23b0202, MIT, see llama_mmq/ggml/LICENSE).
@@ -1333,6 +1336,63 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/kt_gguf_moe_mmq.cu b/py
 +}
 +
 +// Zero bytes the kernel may read past the last row of the last expert for rows of K values.
++// Dense MMQ (llama_mmq/mmq_types.cu mul_mat): out[M, rows] = X[M, K] @ W[rows, K]^T on raw GGUF blocks, the
++// activations quantized to q8_1 here, accumulated in fp32 and written once in out's dtype. X and out may be row
++// views of larger tensors (unit column stride); W's storage must extend ggml_moe_mmq_tail_bytes(type, K) past its
++// last row (pad it once at load time). qbuf (uint8, ggml_mul_mat_mmq_q8_bytes(M, K) bytes or more) holds the
++// quantized activations when given: one buffer reused by every call instead of one allocation of each size.
++void ggml_mul_mat_mmq(torch::Tensor X, torch::Tensor W, int64_t type, torch::Tensor out, std::optional<torch::Tensor> qbuf) {
++  static std::once_flag allocator_installed;
++  std::call_once(allocator_installed, [] { sgl_llama_mmq::set_allocator(llama_mmq_alloc, llama_mmq_free); });
++
++  int64_t qk = 0, block_bytes = 0;
++  TORCH_CHECK(
++      sgl_llama_mmq::type_supported(type) && sgl_llama_mmq::type_info(type, &qk, &block_bytes),
++      "ggml_mul_mat_mmq: GGML type ", type, " is not supported by MMQ");
++  TORCH_CHECK(W.is_cuda() && W.scalar_type() == torch::kUInt8 && W.dim() == 2 && W.stride(1) == 1,
++              "ggml_mul_mat_mmq: W must be a 2D uint8 tensor with contiguous rows");
++  TORCH_CHECK(X.is_cuda() && X.dim() == 2 && X.stride(1) == 1, "ggml_mul_mat_mmq: X must be 2D with unit column stride");
++  TORCH_CHECK(out.is_cuda() && out.dim() == 2 && out.stride(1) == 1, "ggml_mul_mat_mmq: out must be 2D with unit column stride");
++  auto xtype_of = [](const torch::Tensor& t) {
++    TORCH_CHECK(t.scalar_type() == torch::kFloat || t.scalar_type() == torch::kHalf || t.scalar_type() == torch::kBFloat16,
++                "ggml_mul_mat_mmq: float32, float16 or bfloat16 expected");
++    return t.scalar_type() == torch::kFloat ? sgl_llama_mmq::XType::F32
++           : t.scalar_type() == torch::kHalf ? sgl_llama_mmq::XType::F16
++                                             : sgl_llama_mmq::XType::BF16;
++  };
++  const sgl_llama_mmq::XType xtype = xtype_of(X), otype = xtype_of(out);
++  const int64_t rows = W.size(0), row_bytes = W.size(1), M = X.size(0);
++  TORCH_CHECK(row_bytes % block_bytes == 0 && W.stride(0) % block_bytes == 0, "ggml_mul_mat_mmq: W rows are not whole blocks");
++  const int64_t K = row_bytes / block_bytes * qk;
++  TORCH_CHECK(X.size(1) == K, "ggml_mul_mat_mmq: X has ", X.size(1), " columns, W rows hold ", K, " values");
++  TORCH_CHECK(out.size(0) == M && out.size(1) == rows, "ggml_mul_mat_mmq: out must be [M, rows]");
++  if (M == 0 || rows == 0) return;
++  const int64_t needed = (rows - 1) * W.stride(0) + row_bytes + sgl_llama_mmq::weight_tail_bytes(type, K);
++  TORCH_CHECK(static_cast<int64_t>(W.storage().nbytes()) - W.storage_offset() >= needed,
++              "ggml_mul_mat_mmq: the weight storage must extend ", sgl_llama_mmq::weight_tail_bytes(type, K),
++              " bytes past the last row (pad it at load time)");
++
++  const at::cuda::OptionalCUDAGuard device_guard(device_of(X));
++  cudaStream_t stream = at::cuda::getCurrentCUDAStream().stream();
++  const int64_t q8_bytes = sgl_llama_mmq::q8_buffer_bytes(M, K);
++  torch::Tensor quant_X;
++  if (qbuf.has_value()) {
++    TORCH_CHECK(qbuf->is_cuda() && qbuf->scalar_type() == torch::kUInt8 && qbuf->is_contiguous() &&
++                    qbuf->numel() >= q8_bytes && qbuf->device() == X.device(),
++                "ggml_mul_mat_mmq: qbuf must be a contiguous uint8 tensor of ", q8_bytes, " bytes or more on X's device");
++    quant_X = *qbuf;
++  } else {
++    quant_X = torch::empty({q8_bytes}, X.options().dtype(torch::kUInt8));
++  }
++  sgl_llama_mmq::quantize_q8_1_mmq(X.data_ptr(), xtype, M, K, X.stride(0), type, quant_X.data_ptr(), stream);
++  sgl_llama_mmq::mul_mat(W.data_ptr(), rows, K, W.stride(0), type, quant_X.data_ptr(), M, out.data_ptr(), otype,
++                         out.stride(0), stream);
++}
++
++int64_t ggml_mul_mat_mmq_q8_bytes(int64_t M, int64_t K) {
++  return sgl_llama_mmq::q8_buffer_bytes(M, K);
++}
++
 +int64_t ggml_moe_mmq_tail_bytes(int64_t type, int64_t K) {
 +  int64_t qk = 0, block_bytes = 0;
 +  TORCH_CHECK(sgl_llama_mmq::type_info(type, &qk, &block_bytes), "ggml_moe_mmq: GGML type ", type,
@@ -1411,17 +1471,22 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/kt_gguf_moe_mmq.cu b/py
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/kt_gguf_moe_mmq_bind.cpp b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/kt_gguf_moe_mmq_bind.cpp
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/kt_gguf_moe_mmq_bind.cpp
-@@ -0,0 +1,11 @@
+@@ -0,0 +1,16 @@
 +#include <torch/extension.h>
 +torch::Tensor ggml_moe_mmq(torch::Tensor X, torch::Tensor W, torch::Tensor topk_ids, int64_t type, int64_t row,
 +                           bool x_per_slot);
 +int64_t ggml_moe_mmq_tail_bytes(int64_t type, int64_t K);
++void ggml_mul_mat_mmq(torch::Tensor X, torch::Tensor W, int64_t type, torch::Tensor out, std::optional<torch::Tensor> qbuf);
++int64_t ggml_mul_mat_mmq_q8_bytes(int64_t M, int64_t K);
 +torch::Tensor ggml_moe_mmq_sorted(torch::Tensor X, torch::Tensor W, torch::Tensor slot_expert, torch::Tensor bounds,
 +                                  int64_t type, int64_t row);
 +PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 +  m.def("ggml_moe_mmq", &ggml_moe_mmq);
 +  m.def("ggml_moe_mmq_sorted", &ggml_moe_mmq_sorted);
 +  m.def("ggml_moe_mmq_tail_bytes", &ggml_moe_mmq_tail_bytes);
++  m.def("ggml_mul_mat_mmq", &ggml_mul_mat_mmq, pybind11::arg("X"), pybind11::arg("W"), pybind11::arg("type"),
++        pybind11::arg("out"), pybind11::arg("qbuf") = pybind11::none());
++  m.def("ggml_mul_mat_mmq_q8_bytes", &ggml_mul_mat_mmq_q8_bytes);
 +}
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/LICENSE b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/LICENSE
 --- /dev/null
@@ -16507,7 +16572,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml-cuda/mmq.cuh b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml-cuda/mmq.cuh
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml-cuda/mmq.cuh
-@@ -0,0 +1,1610 @@
+@@ -0,0 +1,1644 @@
 +#pragma once
 +
 +#include "common.cuh"
@@ -16523,7 +16588,8 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +typedef void (*ggml_cuda_mmq_load_tiles_t)(const char * __restrict__ x, int * x_tile, const int kbx0, const int i_max, const int stride);
 +typedef void (*ggml_cuda_mmq_vec_dot_t)(const int * __restrict__ x, const int * __restrict__ y, float * __restrict__ sum, const int k00);
 +typedef void (*ggml_cuda_mmq_write_back_t)(const float * __restrict__ sum, const int32_t * __restrict__ get_rows_to_sorted,
-+    float * __restrict__ dst, const float * __restrict__ y_scale, const int stride, const int i_max, const int j_max);
++    float * __restrict__ dst, const float * __restrict__ y_scale, const int stride, const int i_max, const int j_max,
++    const ggml_type dst_type);
 +
 +enum mmq_q8_1_ds_layout {
 +    MMQ_Q8_1_DS_LAYOUT_D4,
@@ -16942,9 +17008,24 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +#include "mmq-load-tiles.cuh"
 +#include "mmq-vec-dot.cuh"
 +
++// dst may hold GGML_TYPE_F32, GGML_TYPE_F16 or GGML_TYPE_BF16 values (dst_type). The float sums are rounded
++// to nearest even once, when stored; partial sums of the stream-k fixup stay in fp32.
++static __device__ __forceinline__ float * ggml_cuda_mmq_dst_offset(float * dst, const int64_t offset, const ggml_type dst_type) {
++    return dst_type == GGML_TYPE_F32 ? dst + offset : (float *) ((char *) dst + offset*2);
++}
++
++static __device__ __forceinline__ void ggml_cuda_mmq_store(float * dst, const int64_t i, const float v, const ggml_type dst_type) {
++    if (dst_type == GGML_TYPE_F32) {
++        dst[i] = v;
++    } else {
++        ((unsigned short *) dst)[i] = dst_type == GGML_TYPE_BF16 ? __bfloat16_as_ushort(__float2bfloat16_rn(v))
++                                                                : __half_as_ushort(__float2half_rn(v));
++    }
++}
++
 +template <ggml_type type, int J, bool fallback, ggml_prec prec_src1> static __device__ __forceinline__ void ggml_cuda_mmq_write_back_dp4a(
 +        const float * __restrict__ sum, const int32_t * __restrict__ ids_dst, float * __restrict__ dst,
-+        const float * __restrict__ y_scale, const int stride, const int i_max, const int j_max) {
++        const float * __restrict__ y_scale, const int stride, const int i_max, const int j_max, const ggml_type dst_type) {
 +    constexpr int warp_size = ggml_cuda_get_physical_warp_size();
 +    constexpr int nwarps    = ggml_cuda_mmq_get_nthreads(type, J, fallback, prec_src1) / warp_size;
 +    constexpr int I         = ggml_cuda_mmq_get_I(type, J, fallback, prec_src1);
@@ -16969,12 +17050,12 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +
 +            if constexpr (type == GGML_TYPE_NVFP4) {
 +                if (y_scale_used) {
-+                    dst[ids_dst[j]*stride + i] = y_scale[j] * sum[(j0/nwarps) * (I/warp_size) + i0/warp_size];
++                    ggml_cuda_mmq_store(dst, ids_dst[j]*stride + i, y_scale[j] * sum[(j0/nwarps) * (I/warp_size) + i0/warp_size], dst_type);
 +                } else {
-+                    dst[ids_dst[j]*stride + i] = sum[(j0/nwarps) * (I/warp_size) + i0/warp_size];
++                    ggml_cuda_mmq_store(dst, ids_dst[j]*stride + i, sum[(j0/nwarps) * (I/warp_size) + i0/warp_size], dst_type);
 +                }
 +            } else {
-+                dst[ids_dst[j]*stride + i] = sum[(j0/nwarps) * (I/warp_size) + i0/warp_size];
++                ggml_cuda_mmq_store(dst, ids_dst[j]*stride + i, sum[(j0/nwarps) * (I/warp_size) + i0/warp_size], dst_type);
 +                GGML_UNUSED(y_scale_used);
 +            }
 +        }
@@ -16984,7 +17065,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +template<ggml_type type, int J, bool fallback, ggml_prec prec_src1>
 +static __device__ __forceinline__ void ggml_cuda_mmq_write_back_mma(
 +            const float * __restrict__ sum, const int * __restrict__ ids_dst, float * __restrict__ dst,
-+            const float * __restrict__ y_scale, const int stride, const int i_max, const int j_max) {
++            const float * __restrict__ y_scale, const int stride, const int i_max, const int j_max, const ggml_type dst_type) {
 +
 +#if defined(AMD_MFMA_AVAILABLE) || defined(AMD_WMMA_AVAILABLE)
 +    typedef tile<16, 16, int, DATA_LAYOUT_J_MAJOR> tile_C;
@@ -17019,12 +17100,12 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +
 +                if constexpr (type == GGML_TYPE_NVFP4) {
 +                    if (y_scale_used) {
-+                        dst[ids_dst[j]*stride + i] = y_scale[j] * sum[(j0/tile_C::J + n)*tile_C::ne + l];
++                        ggml_cuda_mmq_store(dst, ids_dst[j]*stride + i, y_scale[j] * sum[(j0/tile_C::J + n)*tile_C::ne + l], dst_type);
 +                    } else {
-+                        dst[ids_dst[j]*stride + i] = sum[(j0/tile_C::J + n)*tile_C::ne + l];
++                        ggml_cuda_mmq_store(dst, ids_dst[j]*stride + i, sum[(j0/tile_C::J + n)*tile_C::ne + l], dst_type);
 +                    }
 +                } else {
-+                    dst[ids_dst[j]*stride + i] = sum[(j0/tile_C::J + n)*tile_C::ne + l];
++                    ggml_cuda_mmq_store(dst, ids_dst[j]*stride + i, sum[(j0/tile_C::J + n)*tile_C::ne + l], dst_type);
 +                    GGML_UNUSED(y_scale_used);
 +                }
 +            }
@@ -17400,7 +17481,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +        const int * __restrict__ ids_dst, float * __restrict__ dst, float * __restrict__ tmp_fixup,
 +        const float * __restrict__ y_scale,
 +        const int stride_row_x, const int ncols_y, const int stride_col_dst,
-+        const int tile_x_max_i, const int tile_y_max_j, const int kb0_start, const int kb0_stop) {
++        const int tile_x_max_i, const int tile_y_max_j, const int kb0_start, const int kb0_stop, const ggml_type dst_type) {
 +
 +    constexpr int              warp_size  = ggml_cuda_get_physical_warp_size();
 +    constexpr int              nwarps     = ggml_cuda_mmq_get_nthreads(type, J, fallback, prec_src1) / warp_size;
@@ -17466,9 +17547,9 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +    }
 +
 +    if (fixup) {
-+        write_back(sum, ids_dst, tmp_fixup + blockIdx.x*(J*I), y_scale, I, I, J);
++        write_back(sum, ids_dst, tmp_fixup + blockIdx.x*(J*I), y_scale, I, I, J, GGML_TYPE_F32);
 +    } else {
-+        write_back(sum, ids_dst, dst, y_scale, stride_col_dst, tile_x_max_i, tile_y_max_j);
++        write_back(sum, ids_dst, dst, y_scale, stride_col_dst, tile_x_max_i, tile_y_max_j, dst_type);
 +    }
 +}
 +
@@ -17484,7 +17565,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +        const uint3 blocks_per_ne00, const int nrows_x, const int ncols_dst, const int stride_row_x, const int ncols_y, const int stride_col_dst,
 +        const uint3 channel_ratio, const uint3 nchannels_y, const int stride_channel_x, const int stride_channel_y, const int stride_channel_dst,
 +        const uint3 sample_ratio, const uint3 nsamples_y, const int stride_sample_x, const int stride_sample_y, const int stride_sample_dst,
-+        const uint3 ntx) {
++        const uint3 ntx, const ggml_type dst_type) {
 +
 +    // Skip unused template specializations for faster compilation:
 +    if (ggml_cuda_mmq_get_config(type, J, fallback, prec_src1).type == GGML_TYPE_COUNT) {
@@ -17579,9 +17660,9 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +
 +        constexpr bool fixup = false;
 +        mul_mat_q_process_tile<type, J, fallback, fixup, prec_src1>
-+            (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
++            (x, offset_x, y + offset_y, ids_dst_shared, ggml_cuda_mmq_dst_offset(dst, offset_dst, dst_type), tmp_fixup, y_scale_tile,
 +             stride_row_x, ncols_y, stride_col_dst,
-+             tile_x_max_i, tile_y_max_j, 0, blocks_per_ne00.z);
++             tile_x_max_i, tile_y_max_j, 0, blocks_per_ne00.z, dst_type);
 +        return;
 +    }
 +
@@ -17609,6 +17690,10 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +        tmp2 = fast_div_modulo(tmp, nsamples_y);
 +        const int wt = tmp2.y;
 +        const int it = tmp2.x;
++
++        // With a half-precision dst, the end of a tile started by a previous block goes to the fixup buffer as well
++        // (slot gridDim.x + blockIdx.x, contiguous like the others), so that the fixup rounds the complete sum once.
++        const bool tail_to_fixup = dst_type != GGML_TYPE_F32 && kb0_start != 0;
 +
 +        // Defaults for regular matrix multiplication:
 +        int col_low    = 0;
@@ -17653,7 +17738,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +                    break;
 +                }
 +
-+                ids_dst_shared[j] = ids_dst[col_low + jt*J + j];
++                ids_dst_shared[j] = tail_to_fixup ? j : ids_dst[col_low + jt*J + j];
 +            }
 +            __syncthreads();
 +        }
@@ -17673,9 +17758,10 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +
 +        constexpr bool fixup = false; // All but (potentially) the last iterations write their data to dst rather than the fixup buffer.
 +        mul_mat_q_process_tile<type, J, fallback, fixup, prec_src1>
-+            (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
-+             stride_row_x, ncols_y, stride_col_dst,
-+             tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
++            (x, offset_x, y + offset_y, ids_dst_shared,
++             tail_to_fixup ? tmp_fixup + (gridDim.x + blockIdx.x)*(J*I) : ggml_cuda_mmq_dst_offset(dst, offset_dst, dst_type),
++             tmp_fixup, y_scale_tile, stride_row_x, ncols_y, tail_to_fixup ? I : stride_col_dst,
++             tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop, tail_to_fixup ? GGML_TYPE_F32 : dst_type);
 +
 +        kbc += blocks_per_ne00.z;
 +        kbc -= fastmodulo(kbc, blocks_per_ne00);
@@ -17757,9 +17843,9 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +
 +    constexpr bool fixup = true; // Last index writes its data to fixup buffer to avoid data races with other blocks.
 +    mul_mat_q_process_tile<type, J, fallback, fixup, prec_src1>
-+        (x, offset_x, y + offset_y, ids_dst_shared, dst + offset_dst, tmp_fixup, y_scale_tile,
++        (x, offset_x, y + offset_y, ids_dst_shared, ggml_cuda_mmq_dst_offset(dst, offset_dst, dst_type), tmp_fixup, y_scale_tile,
 +         stride_row_x, ncols_y, stride_col_dst,
-+         tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop);
++         tile_x_max_i, tile_y_max_j, kb0_start, kb0_stop, dst_type);
 +}
 +
 +template <ggml_type type, int J, bool fallback, ggml_prec prec_src1>
@@ -17768,7 +17854,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +        const int32_t * __restrict__ ids_dst, const int32_t * __restrict__ expert_bounds, float * __restrict__ dst,
 +        float * __restrict__ tmp_last_tile, const uint3 blocks_per_ne00, const int nrows_x, const int ncols_dst,
 +        const int stride_col_dst, const uint3 nchannels_y, const int stride_channel_dst, const uint3 nsamples_y,
-+        const int stride_sample_dst, const uint3 ntx) {
++        const int stride_sample_dst, const uint3 ntx, const ggml_type dst_type) {
 +    constexpr int warp_size       = ggml_cuda_get_physical_warp_size();
 +    constexpr int nwarps          = (ggml_cuda_mmq_get_nthreads(type, J, fallback, prec_src1) / 2) / warp_size;
 +    constexpr int I               = ggml_cuda_mmq_get_I(type, J, fallback, prec_src1);
@@ -17848,7 +17934,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +
 +    if (!ids_dst) {
 +        const int offset_dst = wt*stride_sample_dst + zt*stride_channel_dst + jt*J*stride_col_dst + it*I;
-+        dst += offset_dst;
++        dst = ggml_cuda_mmq_dst_offset(dst, offset_dst, dst_type);
 +
 +        const int i_max = nrows_x   - it*I - 1;
 +        const int j_max = ncols_dst - jt*J - 1;
@@ -17864,7 +17950,12 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +                return;
 +            }
 +
-+            dst[j*stride_col_dst + i] += sum[j0/nwarps];
++            if (dst_type == GGML_TYPE_F32) {
++                dst[j*stride_col_dst + i] += sum[j0/nwarps];
++            } else {
++                const float tail = tmp_last_tile[(gridDim.x + bidx0)*(J*I) + j*I + i];
++                ggml_cuda_mmq_store(dst, j*stride_col_dst + i, tail + sum[j0/nwarps], dst_type);
++            }
 +        }
 +        return;
 +    }
@@ -17888,7 +17979,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +    __syncthreads();
 +
 +    const int offset_dst = it*I;
-+    dst += offset_dst;
++    dst = ggml_cuda_mmq_dst_offset(dst, offset_dst, dst_type);
 +
 +    const int i_max = nrows_x  - it*I - 1;
 +    const int j_max = col_diff - jt*J - 1;
@@ -17904,7 +17995,12 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +            return;
 +        }
 +
-+        dst[ids_dst_shared[j]*stride_col_dst + i] += sum[j0/nwarps];
++        if (dst_type == GGML_TYPE_F32) {
++            dst[ids_dst_shared[j]*stride_col_dst + i] += sum[j0/nwarps];
++        } else {
++            const float tail = tmp_last_tile[(gridDim.x + bidx0)*(J*I) + j*I + i];
++            ggml_cuda_mmq_store(dst, ids_dst_shared[j]*stride_col_dst + i, tail + sum[j0/nwarps], dst_type);
++        }
 +    }
 +}
 +
@@ -17916,6 +18012,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +    int64_t nsamples_x; int64_t nsamples_y; int64_t stride_sample_x; int64_t stride_sample_y; int64_t stride_sample_dst;
 +    int64_t ncols_max;
 +    int J_best; // Tile width in ne11(dense)/ne12(MoE) direction to use for optimal performance.
++    ggml_type type_dst = GGML_TYPE_F32; // F32, F16 or BF16; dst is a float pointer to values of this type.
 +};
 +
 +static size_t mmq_get_nbytes_shared(const ggml_cuda_mmq_config & config, const int cc) {
@@ -17934,6 +18031,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +
 +    const ggml_cuda_mmq_config config = ggml_cuda_mmq_get_config(type, J, fallback, cc, prec_src1);
 +    GGML_ASSERT(config.nthreads % warp_size == 0);
++    GGML_ASSERT(args.type_dst == GGML_TYPE_F32 || args.type_dst == GGML_TYPE_F16 || args.type_dst == GGML_TYPE_BF16);
 +    const int nwarps = config.nthreads / warp_size;
 +    const int nbytes_shared = mmq_get_nbytes_shared(config, cc);
 +
@@ -17965,7 +18063,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +             blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
 +             channel_ratio_fd, nchannels_y_fd, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
 +             sample_ratio_fd, nsamples_y_fd, args.stride_sample_x, args.stride_sample_y, args.stride_sample_dst,
-+             ntx_fd);
++             ntx_fd, args.type_dst);
 +        return;
 +    }
 +
@@ -17983,7 +18081,8 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +    ggml_cuda_pool & pool = ctx.pool(id);
 +    ggml_cuda_pool_alloc<float> tmp_fixup(pool);
 +    if (fixup_needed) {
-+        tmp_fixup.alloc(block_nums_stream_k.x * config.J*config.I);
++        // Half-precision dst: a second slot per block for the end of a tile started by the previous block.
++        tmp_fixup.alloc((args.type_dst == GGML_TYPE_F32 ? 1 : 2) * block_nums_stream_k.x * config.J*config.I);
 +    }
 +
 +    const dim3 block_nums_fixup(block_nums_stream_k.x, config.I/warp_size, 1);
@@ -17994,7 +18093,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +         blocks_per_ne00_fd, args.nrows_x, args.ncols_dst, args.stride_row_x, args.ncols_y, args.nrows_dst,
 +         channel_ratio_fd, nchannels_y_fd, args.stride_channel_x, args.stride_channel_y, args.stride_channel_dst,
 +         sample_ratio_fd, nsamples_y_fd, args.stride_sample_x, args.stride_sample_y, args.stride_sample_dst,
-+         ntx_fd);
++         ntx_fd, args.type_dst);
 +
 +    if (!fixup_needed) {
 +        return;
@@ -18004,7 +18103,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +    mul_mat_q_stream_k_fixup<type, J, fallback, prec_src1><<<block_nums_fixup, block_dims_fixup, 0, stream>>>
 +        (args.ids_dst, args.expert_bounds, args.dst, tmp_fixup.ptr, blocks_per_ne00_fd, args.nrows_x, args.ncols_dst,
 +         args.nrows_dst, nchannels_y_fd, args.stride_channel_dst, nsamples_y_fd, args.stride_sample_dst,
-+         ntx_fd);
++         ntx_fd, args.type_dst);
 +}
 +
 +template <ggml_type type, bool fallback, ggml_prec prec_src1>
@@ -18155,6 +18254,15 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml
 +#include "../mmq.cuh"
 +
 +DECL_MMQ_CASE(GGML_TYPE_Q2_0);
+diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_k.cu b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_k.cu
+--- /dev/null
++++ b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml-cuda/template-instances/mmq-instance-q5_k.cu
+@@ -0,0 +1,5 @@
++// This file has been autogenerated by generate_cu_files.py, do not edit manually.
++
++#include "../mmq.cuh"
++
++DECL_MMQ_CASE(GGML_TYPE_Q5_K);
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml-cuda/template-instances/mmq-instance-q8_0.cu b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml-cuda/template-instances/mmq-instance-q8_0.cu
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/ggml/src/ggml-cuda/template-instances/mmq-instance-q8_0.cu
@@ -20777,9 +20885,11 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/mmq_moe.cu b/
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/mmq_types.cu b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/mmq_types.cu
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/mmq_types.cu
-@@ -0,0 +1,132 @@
+@@ -0,0 +1,197 @@
 +// Generated from llama_mmq/mmq_dense.cu (SGLang 5ac69dd):
-+// the types cut to Q2_0 and Q8_0 (the template instances built here), the dense mul_mat() removed.
++// the types cut to the template instances built here (the routed and dense types of the GGUF packs), with the
++// dense mul_mat() of SGLang a7e0e1e (perf/gguf-mmq-llamacpp) writing f32, f16 or bf16
++// (its patches/0001-mmq-dst-type.patch, applied to ggml/ here).
 +// Host entry for the vendored llama.cpp MMQ kernels: a plain 2D matmul on raw GGUF blocks.
 +// Mirrors the dense (non-ids) path of ggml_cuda_mul_mat_q() in llama.cpp's ggml/src/ggml-cuda/mmq.cu
 +// (commit in ggml/LLAMA_CPP_COMMIT) with ne02 = ne03 = ne12 = ne13 = 1 and the activations always
@@ -20799,6 +20909,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/mmq_types.cu 
 +#define SGL_LLAMA_MMQ_TYPES(X) \
 +  X(Q2_0)                      \
 +  X(Q8_0)                      \
++  X(Q5_K)                      \
 +  X(IQ2_XXS)                   \
 +  X(IQ2_XS)                    \
 +  X(IQ1_S)                     \
@@ -20882,6 +20993,68 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/mmq_types.cu 
 +    GGML_ABORT("device %d: llama.cpp MMQ supports at most %d devices", id, GGML_CUDA_MAX_DEVICES);
 +  }
 +  return id;
++}
++
++void mul_mat(
++    const void* w,
++    int64_t rows,
++    int64_t K,
++    int64_t ldw_bytes,
++    int64_t type_i,
++    const void* yq,
++    int64_t M,
++    void* dst,
++    XType dst_type,
++    int64_t ld_dst,
++    cudaStream_t stream) {
++  const ggml_type type = (ggml_type)type_i;
++  int64_t qk, bs;
++  GGML_ASSERT(type_info(type, &qk, &bs));
++  GGML_ASSERT(K % qk == 0);
++  GGML_ASSERT(ldw_bytes % bs == 0);
++  GGML_ASSERT(ld_dst >= rows);
++
++  const int id = current_device();
++  const int J_best = select_tile_J(type, rows, M, id);
++  const int64_t K_padded = GGML_PAD(K, MATRIX_ROW_PADDING);
++  const int64_t s01 = ldw_bytes / bs;  // weight row stride in blocks
++  const int64_t s02 = rows * s01;
++  const int64_t s2 = M * ld_dst;
++  const int64_t s12 = M * K_padded * (int64_t)sizeof(block_q8_1) / (QK8_1 * (int64_t)sizeof(int));
++
++  // As ggml_cuda_mul_mat_q for a plain 2D MUL_MAT (ne02 = ne03 = ne12 = ne13 = 1).
++  const mmq_args args = {/*x=*/(const char*)w,
++                         /*type_x=*/type,
++                         /*y=*/(const int*)yq,
++                         /*ids_dst=*/nullptr,
++                         /*expert_bounds=*/nullptr,
++                         /*dst=*/(float*)dst,
++                         /*y_scale=*/nullptr,
++                         /*ncols_x=*/K,
++                         /*nrows_x=*/rows,
++                         /*ncols_dst=*/M,
++                         /*stride_row_x=*/s01,
++                         /*ncols_y=*/M,
++                         /*nrows_dst=*/ld_dst,
++                         /*nchannels_x=*/1,
++                         /*nchannels_y=*/1,
++                         /*stride_channel_x=*/s02,
++                         /*stride_channel_y=*/s12,
++                         /*stride_channel_dst=*/s2,
++                         /*nsamples_x=*/1,
++                         /*nsamples_y=*/1,
++                         /*stride_sample_x=*/s02,
++                         /*stride_sample_y=*/s12,
++                         /*stride_sample_dst=*/s2,
++                         /*ncols_max=*/M,
++                         /*J_best=*/J_best,
++                         /*type_dst=*/dst_type == XType::F32 ? GGML_TYPE_F32
++                         : dst_type == XType::F16            ? GGML_TYPE_F16
++                                                             : GGML_TYPE_BF16};
++
++  g_cur_stream = stream;
++  mul_mat_q_switch_type(device_context(id), args, stream);
++  CUDA_CHECK(cudaGetLastError());
 +}
 +
 +int select_tile_J(ggml_type type, int64_t rows, int64_t ncols, int device) {
@@ -21228,7 +21401,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/quantize_mmq_
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/sgl_llama_mmq.h b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/sgl_llama_mmq.h
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/sgl_llama_mmq.h
-@@ -0,0 +1,110 @@
+@@ -0,0 +1,112 @@
 +// Interface between SGLang's GGUF ops and the llama.cpp MMQ kernels vendored under ggml/.
 +//
 +// Neither torch nor ggml headers are included here: the ggml headers (ggml-common.h, ...) define the
@@ -21271,8 +21444,9 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/sgl_llama_mmq
 +void quantize_q8_1_mmq(
 +    const void* x, XType xtype, int64_t M, int64_t K, int64_t ldx, int64_t type, void* yq, cudaStream_t stream);
 +
-+// dst[M, rows] (row stride ld_dst floats) = yq[M, K] @ W[rows, K]^T. W rows are raw GGUF blocks with a row stride
-+// of ldw_bytes (a multiple of the block size); the weight storage must hold weight_tail_bytes() past the last row.
++// dst[M, rows] (row stride ld_dst elements of dst_type) = yq[M, K] @ W[rows, K]^T, accumulated in fp32 and
++// rounded once to dst_type (round to nearest even). W rows are raw GGUF blocks with a row stride of ldw_bytes
++// (a multiple of the block size); the weight storage must hold weight_tail_bytes() past the last row.
 +void mul_mat(
 +    const void* w,
 +    int64_t rows,
@@ -21281,7 +21455,8 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/sgl_llama_mmq
 +    int64_t type,
 +    const void* yq,
 +    int64_t M,
-+    float* dst,
++    void* dst,
++    XType dst_type,
 +    int64_t ld_dst,
 +    cudaStream_t stream);
 +
@@ -21342,9 +21517,14 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq/llama_mmq/sgl_llama_mmq
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq.py b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq.py
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_moe_mmq.py
-@@ -0,0 +1,88 @@
-+"""llama.cpp's int8-mma MoE matmul (MUL_MAT_ID MMQ) for Q2_0 and Q8_0 GGUF experts,
-+as a small torch extension next to sgl-kernel (which it does not replace).
+@@ -0,0 +1,103 @@
++"""llama.cpp's int8-mma matmul on raw GGUF blocks (MMQ) as a small torch extension next to sgl-kernel (which it
++does not replace): MUL_MAT_ID for the GGUF experts (Q2_0, Q8_0, IQ2_XXS, IQ2_XS, IQ1_S, IQ1_M) and the plain
++MUL_MAT for the dense layers' prefill (also Q5_K).
++
++`mul_mat(X, W, type, out)` writes out[M, rows] = X @ W^T in out's dtype (fp32 accumulation, one rounding);
++X and out may be row views (unit column stride), W [rows, row_bytes] must be followed in its storage by
++`tail_bytes(type, K)` readable bytes (zero them at load).
 +
 +`moe_mmq(X, W, topk_ids, type, rows, x_per_slot)` is ggml_moe_mmq of our SGLang
 +branch perf/gguf-mmq-q2_0 (5ac69dd): out[t, s, :] = W[topk_ids[t, s]] @ x(t, s)
@@ -21401,6 +21581,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq.py b/python/sglang/srt/
 +                     str(lm / "mmq_types.cu"), str(lm / "mmq_moe.cu"), str(lm / "quantize_mmq_q8_1.cu"),
 +                     str(cu / "mmid.cu"), str(cu / "template-instances/mmq-instance-q2_0.cu"),
 +                     str(cu / "template-instances/mmq-instance-q8_0.cu"),
++                     str(cu / "template-instances/mmq-instance-q5_k.cu"),
 +                     str(cu / "template-instances/mmq-instance-iq2_xxs.cu"),
 +                     str(cu / "template-instances/mmq-instance-iq2_xs.cu"),
 +                     str(cu / "template-instances/mmq-instance-iq1_s.cu"),
@@ -21421,6 +21602,15 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_moe_mmq.py b/python/sglang/srt/
 +    """X [n, K] rows already sorted by expert; slot_expert [n] int32 (their experts, non-decreasing); bounds
 +    [n_experts + 1] int32 on the device. No ids helper (it cost as much as the GEMMs, 10-25)."""
 +    return _load().ggml_moe_mmq_sorted(X, W, slot_expert, bounds, qtype, rows)
++
++
++def mul_mat(X, W, qtype: int, out, qbuf=None) -> None:
++    _load().ggml_mul_mat_mmq(X, W, qtype, out, qbuf)
++
++
++def q8_bytes(M: int, K: int) -> int:
++    """Bytes of the q8_1 buffer mul_mat needs for M rows of K values."""
++    return int(_load().ggml_mul_mat_mmq_q8_bytes(M, K))
 +
 +
 +def tail_bytes(qtype: int, K: int) -> int:
@@ -28719,22 +28909,112 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/layers/quantization/gguf.py
 --- a/python/sglang/srt/layers/quantization/gguf.py
 +++ b/python/sglang/srt/layers/quantization/gguf.py
-@@ -206,6 +206,10 @@
+@@ -206,6 +206,89 @@
      return ggml_dequantize(qweight, qweight_type, *shape, dtype)
  
  
 +_DEQUANT_ROWS = int(__import__("os").environ.get("SGLANG_GGUF_DEQUANT_ROWS", "64") or 1 << 30)
++# Prefill-sized batches (SGLANG_GGUF_MMQ_ROWS rows and more) of the types below run on llama.cpp's MMQ
++# (kt_gguf_moe_mmq, built for the GPU's own arch): the weight stays in its GGUF blocks, the activations are
++# quantized to q8_1 in slices of rows whose buffer stays under SGLANG_GGUF_MMQ_SLICE_MB, and the output is
++# written in the activations' dtype. SGLANG_GGUF_PREFILL_MMQ=0 keeps the dequant + bf16 GEMM path below.
++_MMQ_ON = __import__("os").environ.get("SGLANG_GGUF_PREFILL_MMQ", "1") == "1"
++_MMQ_ROWS = int(__import__("os").environ.get("SGLANG_GGUF_MMQ_ROWS", "64") or 1 << 30)
++_MMQ_SLICE_MB = int(__import__("os").environ.get("SGLANG_GGUF_MMQ_SLICE_MB", "32") or 32)
++# the template instances kt_gguf_moe_mmq builds: Q8_0, Q5_K, IQ2_XXS, IQ2_XS, IQ1_S, IQ1_M, Q2_0
++MMQ_PREFILL_TYPES = {8, 13, 16, 17, 19, 29, 42}
++_MATRIX_ROW_PADDING = 512
++
++
++def mmq_tail_bytes(qweight_type: int, K: int) -> int:
++    """Bytes the MMQ kernel reads past a weight's last row: ggml pads a row to 512 values."""
++    if K % _MATRIX_ROW_PADDING == 0:
++        return 0
++    block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
++    return (_MATRIX_ROW_PADDING - K % _MATRIX_ROW_PADDING) // block_size * type_size
++
++
++def _mmq_weight_ok(qweight: torch.Tensor, qweight_type: int) -> bool:
++    if qweight.dim() != 2 or qweight.dtype != torch.uint8 or qweight.stride(1) != 1 or not qweight.is_cuda:
++        return False
++    block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
++    K = qweight.shape[1] // type_size * block_size
++    needed = (qweight.shape[0] - 1) * qweight.stride(0) + qweight.shape[1] + mmq_tail_bytes(qweight_type, K)
++    return qweight.untyped_storage().nbytes() - qweight.storage_offset() >= needed
++
++
++_MMQ_QBUF: dict = {}
++_MMQ_STEP: dict = {}
++
++
++def mmq_qbuf(device: torch.device) -> torch.Tensor:
++    """The q8_1 buffer every prefill MMQ call on a device quantizes its activations into (SGLANG_GGUF_MMQ_SLICE_MB),
++    made at load: one block the caching allocator keeps, instead of one of each size a call."""
++    buf = _MMQ_QBUF.get(device)
++    if buf is None:
++        buf = _MMQ_QBUF[device] = torch.empty(_MMQ_SLICE_MB << 20, dtype=torch.uint8, device=device)
++    return buf
++
++
++def mmq_mul_mat(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int, out: torch.Tensor) -> None:
++    """out[M, rows] = x @ W^T on llama.cpp's MMQ, M in slices whose q8_1 activations fit the device's buffer."""
++    from sglang.srt.layers.moe import kt_gguf_moe_mmq
++
++    M, K = x.shape
++    qbuf = mmq_qbuf(x.device)
++    step = _MMQ_STEP.get(K)
++    if step is None:
++        step = 64
++        while kt_gguf_moe_mmq.q8_bytes(step * 2, K) <= qbuf.numel():
++            step *= 2
++        while kt_gguf_moe_mmq.q8_bytes(step + 64, K) <= qbuf.numel():
++            step += 64
++        _MMQ_STEP[K] = step
++    for r0 in range(0, M, step):
++        kt_gguf_moe_mmq.mul_mat(x[r0 : r0 + step], qweight, qweight_type, out[r0 : r0 + step], qbuf)
++
++
++def pad_for_mmq(qweight: torch.Tensor, qweight_types) -> "torch.Tensor | None":
++    """A copy of a GGUF weight whose storage extends the MMQ tail past its last row (zeros), or None when it
++    already does or MMQ does not take it. Done once at load, before any CUDA graph records the weight."""
++    if not _MMQ_ON or qweight.dim() != 2 or qweight.dtype != torch.uint8 or not qweight.is_cuda:
++        return None
++    if not qweight.is_contiguous():
++        return None
++    tail = 0
++    for t in qweight_types:
++        if t in MMQ_PREFILL_TYPES:
++            block_size, type_size = gguf.GGML_QUANT_SIZES[t]
++            tail = max(tail, mmq_tail_bytes(t, qweight.shape[1] // type_size * block_size))
++    n = qweight.numel()
++    if tail == 0 or qweight.untyped_storage().nbytes() - qweight.storage_offset() >= n + tail:
++        return None
++    buf = torch.zeros(n + tail, dtype=torch.uint8, device=qweight.device)
++    padded = buf[:n].view(qweight.shape)
++    padded.copy_(qweight)
++    return padded
 +_DEQUANT_SLICE_MB = int(__import__("os").environ.get("SGLANG_GGUF_DEQUANT_SLICE_MB", "256") or 1 << 20)
 +
 +
  def fused_mul_mat_gguf(
      x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
  ) -> torch.Tensor:
-@@ -220,6 +224,19 @@
+@@ -220,6 +303,30 @@
      # there is no need to call any kernel for fp16/bf16
      if qweight_type in UNQUANTIZED_TYPES:
          return x @ qweight.T
-+    # prefill-sized batches dequantize and run a bf16 GEMM (the a8 MMQ
++    # prefill-sized batches on llama.cpp's MMQ (no copy of the weight)
++    if (
++        _MMQ_ON
++        and x.shape[0] >= _MMQ_ROWS
++        and qweight_type in MMQ_PREFILL_TYPES
++        and x.stride(1) == 1
++        and _mmq_weight_ok(qweight, qweight_type)
++    ):
++        out = torch.empty(x.shape[0], qweight.shape[0], dtype=x.dtype, device=x.device)
++        mmq_mul_mat(x, qweight, qweight_type, out)
++        return out
++    # otherwise prefill-sized batches dequantize and run a bf16 GEMM (the a8 MMQ
 +    # below is a decode kernel: 71% of a 27K prefill's GPU time on Q5_K / Q8_0 dense weights, 10-25);
 +    # the copy is made in slices of rows so the transient stays small (the lm_head's is 1.2 GiB whole)
 +    if x.shape[0] >= _DEQUANT_ROWS and qweight_type in DEQUANT_TYPES:
@@ -28750,7 +29030,7 @@ diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/la
      # enable MMVQ in contiguous batching with batch_size=1
      if x.shape[0] <= mmvq_safe and qweight_type in MMVQ_QUANT_TYPES:
          y = ggml_mul_mat_vec_a8(qweight, x, qweight_type, qweight.shape[0])
-@@ -375,6 +392,48 @@
+@@ -375,6 +482,48 @@
      return out_hidden_states
  
  
@@ -28799,7 +29079,7 @@ diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/la
  def apply_gguf_embedding(
      x: torch.Tensor,
      qweight: torch.Tensor,
-@@ -384,6 +443,14 @@
+@@ -384,6 +533,14 @@
  ) -> torch.Tensor:
      if qweight_type in UNQUANTIZED_TYPES:
          return torch.embedding(qweight, x)
@@ -28814,7 +29094,7 @@ diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/la
      elif qweight_type in DEQUANT_TYPES:
          block_size, type_size = gguf.GGML_QUANT_SIZES[qweight_type]
          x_flat = x.flatten()
-@@ -398,6 +465,12 @@
+@@ -398,6 +555,12 @@
          raise NotImplementedError(f"Unsupported GGUF quantization type: {qweight_type}")
  
  
@@ -28827,6 +29107,22 @@ diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/la
  class GGUFLinearMethod(LinearMethodBase):
      """Linear method for GGUF.
  
+@@ -464,6 +627,15 @@
+         # For MergedColumnParallelLinear and QKVParallelLinear, we need to
+         # materialize the padded weight parameter for CUDA Graph compatibility.
+         self._create_padded_weight_param(layer)
++        # the bytes MMQ reads past the last row, once, before decode graphs record the weight
++        types = set(layer.qweight_type.shard_weight_type.values()) or {qweight_type}
++        if _MMQ_ON and layer.qweight.is_cuda and types & MMQ_PREFILL_TYPES:
++            mmq_qbuf(layer.qweight.device)
++        padded = pad_for_mmq(layer.qweight.data, types)
++        if padded is not None:
++            padded_param = Parameter(padded, requires_grad=False)
++            set_weight_attrs(padded_param, vars(layer.qweight))
++            layer.register_parameter("qweight", padded_param)
+ 
+     def _create_padded_weight_param(self, layer: torch.nn.Module):
+         """Create padded weight parameter for GGUF MergedLinear layer."""
 diff -ruN a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
 --- a/python/sglang/srt/model_executor/model_runner.py
 +++ b/python/sglang/srt/model_executor/model_runner.py
@@ -28932,11 +29228,29 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
  def _apply_gguf_grouped_wo_a(
      o: torch.Tensor,
      qweight: torch.Tensor,
-@@ -922,6 +959,26 @@
+@@ -922,6 +959,44 @@
          from sglang.srt.layers.quantization.gguf import fused_mul_mat_gguf
  
          matmul_fn = fused_mul_mat_gguf
-+        # prefill-sized batches dequantize the layer's rows once and run one
++        # prefill-sized batches on llama.cpp's MMQ, one group at a time (its q8_1 buffer is one group's
++        # activations, sliced by rows; the weight stays in its GGUF blocks)
++        from sglang.srt.layers.quantization import gguf as _gguf
++
++        if (
++            _gguf._MMQ_ON
++            and o.shape[0] >= _gguf._MMQ_ROWS
++            and qweight_type in _gguf.MMQ_PREFILL_TYPES
++            and o.stride(2) == 1
++            and _gguf._mmq_weight_ok(qweight, qweight_type)
++        ):
++            M, G, _ = o.shape
++            out = torch.empty(M, G, o_lora_rank, dtype=o.dtype, device=o.device)
++            for g in range(G):
++                _gguf.mmq_mul_mat(
++                    o[:, g, :], qweight[g * o_lora_rank : (g + 1) * o_lora_rank], qweight_type, out[:, g, :]
++                )
++            return out
++        # otherwise prefill-sized batches dequantize the layer's rows once and run one
 +        # batched bf16 GEMM (sgl_kernel's a8 MMQ a head took 72% of a 27K prefill's GPU time, 10-25)
 +        if o.shape[0] >= _WO_A_DEQUANT_ROWS:
 +            from sglang.srt.layers.quantization.gguf import dequantize_gguf_weight
@@ -28959,7 +29273,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
  
      group_outputs = []
      for group_id in range(o.shape[1]):
-@@ -1255,7 +1312,7 @@
+@@ -1255,7 +1330,7 @@
          quantize_wo_a = fp8 or self.use_npu_arch35_mxfp8_wo_a
          if wo_a_keeps_quant_config is None:
              keep_source_quant = (
@@ -28968,7 +29282,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
              )
              wo_a_quant_config: Optional[QuantizationConfig] = (
                  quant_config if quantize_wo_a or keep_source_quant else None
-@@ -1394,7 +1451,10 @@
+@@ -1394,7 +1469,10 @@
              beta_fast=scaling.get("beta_fast", 32),
              beta_slow=scaling.get("beta_slow", 1),
          )
@@ -28980,7 +29294,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
          self.register_buffer("freqs_cis", freqs_cis, persistent=False)
          self.freqs_cis: torch.Tensor
  
-@@ -1603,6 +1663,9 @@
+@@ -1603,6 +1681,9 @@
              is_neox_style=False,
              device=get_device().device,
          )
@@ -28990,7 +29304,7 @@ diff -ruN a/python/sglang/srt/models/deepseek_v4.py b/python/sglang/srt/models/d
  
          if _is_npu:
              rope = Dsv4NpuRoPE.for_freqs(
-@@ -3983,7 +4046,7 @@
+@@ -3983,7 +4064,7 @@
          if self.pp_group.is_first_rank:
              embedding_quant_config = (
                  quant_config

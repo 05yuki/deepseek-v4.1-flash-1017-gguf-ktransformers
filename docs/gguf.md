@@ -15,8 +15,15 @@ A switch marked "on" is on in `serve.sh`.
 - **Dense layers** (`kt_gguf_dense_v41.py`, `quantization/gguf.py`, the loader): every dense tensor is
   read from the GGUF shards and kept in its GGUF type on the GPU (Q5_K and others in this pack). The
   compressor and the indexer are dequantized to bf16 at load (`modules_to_not_convert`). Decode
-  multiplies the GGUF rows with vector kernels taken from llama.cpp (`kt_gguf_moe_multi/`); a prefill
-  of 64 rows or more dequantizes each weight to bf16 once and runs a bf16 GEMM.
+  multiplies the GGUF rows with vector kernels taken from llama.cpp (`kt_gguf_moe_multi/`).
+- **Dense prefill** (64 rows or more): llama.cpp's MMQ multiplies the same GGUF blocks
+  (`kt_gguf_moe_mmq/`, Q5_K and Q8_0 here). No bf16 copy of a weight is made. The activations are
+  quantized to q8_1 into one 32 MiB buffer, a slice of rows at a time (`SGLANG_GGUF_MMQ_SLICE_MB`),
+  and the output is written in bf16. Tensors whose rows are not a multiple of 512 values (q_b and the
+  shared expert's down projection here) get 176 zero bytes after their last row at load, which the
+  kernel reads. `SGLANG_GGUF_PREFILL_MMQ=0` goes back to a bf16 copy of each weight and a bf16 GEMM.
+  Against that path on the RTX 5070 Ti: the window's allocated peak is 0.3 to 0.5 GB lower, a warm
+  35K prefill 4 to 6% faster, and the NLL the same (+0.0010 and +0.0018 over two launches, SE 0.003).
 - **Embedding**: the token embedding stays in its GGUF type (Q5_K, 434 MiB instead of a 1,262 MiB bf16
   copy); the rows a batch looks up are opened in float32 in gguf-py's order of operations, so the
   embeddings are the same values the bf16 copy held.
@@ -119,8 +126,10 @@ the GGUF instead of kept in host memory (`KT_PREFILL_LEND_MIRROR=gguf`, on).
 - **sgl-kernel ops**: the sgl-kernel wheel carries sm_80 and newer code only. `kt_sm75_ops.py` builds
   its GGUF, activation, RoPE, top-k and `moe_sum` sources (in SGLang's tree) for the GPU's arch with
   torch's JIT loader (`setup.sh` does it once) and registers them as those ops' CUDA kernels.
-- **Prefill**: the dense layers' prefill runs on MMQ in their GGUF types (`SGLANG_GGUF_DEQUANT_ROWS`,
-  `SGLANG_DSV4_WO_A_DEQUANT_ROWS`): the bf16 copy path needs a bf16 cuBLAS GEMM.
+- **Prefill**: the dense layers' prefill runs on the same llama.cpp MMQ, built for sm_75. The bf16
+  copy path is not an option there: it needs a bf16 cuBLAS GEMM (SM80+). Against sgl-kernel's older
+  dp4a MMQ (`SGLANG_GGUF_PREFILL_MMQ=0`), an 8K prefill on the RTX 2070 took 149 to 158 s instead of
+  181 to 189 s (two launches each).
 - **Context and chunk**: a card under 12 GB defaults to 32,768 tokens. The prefill chunk is 2,048
   tokens with no calibration launch: on SM75 the TileLang mHC kernels (`hc_split_sinkhorn`,
   `mhc_post`) fail to launch inside the server on 8,192-token chunks (`CUDA_ERROR_INVALID_VALUE`;
