@@ -113,6 +113,19 @@ with llama.cpp's MMQ kernels (`kt_gguf_moe_mmq/`, `KT_GGUF_STREAM_MMQ=1`, on), b
 arch. The lends work as in the MXFP4 recipe; the lend's copy of the dense weights is read back from
 the GGUF instead of kept in host memory (`KT_PREFILL_LEND_MIRROR=gguf`, on).
 
+The MMQ body keeps no inputs of its own.
+It reads the layer's hidden states, ids and weights where they are, and adds into the MoE output
+(`KT_GGUF_STREAM_INTO=1`, on).
+A group's routes go through the kernels 8,192 at a time (`KT_GGUF_STREAM_MMQ_ROUTES`).
+So the group's temporary buffers keep one size however long the window.
+On one 16 GB card a window of 38,912 rows fits; before, 30,720 ran out of memory.
+
+The prefill plan still sizes windows at 460 KiB a row, so a 35,000-token prompt runs in two.
+A lower cost a row puts it in one window: `KT_PREFILL_PLAN_COST_PRIOR=2600,274432,280,820`.
+That only pays when the experts come from the drive.
+With the expert cache cold it was 58% faster, at 64 GB up to 17%, with every expert in RAM no faster.
+The one window also leaves PyTorch's allocator a few retries at its end, so it is not the default.
+
 ## Turing (SM75)
 
 `serve.sh` lets an RTX 20 card through and sets it up as below (all of it inert on SM80 and newer):

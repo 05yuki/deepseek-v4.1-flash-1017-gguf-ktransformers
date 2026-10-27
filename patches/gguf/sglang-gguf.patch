@@ -435,6 +435,20 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/la
              gpu_combine_input = self.gpu_method.apply(layer, masked_dispatch_output)
              output = gpu_combine_input.hidden_states
              if streamer is not None and _hot_check:
+@@ -600,7 +623,12 @@
+ 
+         # Step 4: Synchronize CPU results and merge with GPU results
+         if streamer is not None:
+-            output = output + streamer.run(self, layer, dispatch_output, physical_ids)
++            if getattr(streamer, "accumulates_into", False) and output.is_contiguous() and \
++                    output.untyped_storage().data_ptr() != x.untyped_storage().data_ptr():
++                # the GGUF MMQ streamer adds into the output: no chunk-sized accumulator and no sum
++                output = streamer.run(self, layer, dispatch_output, physical_ids, into=output)
++            else:
++                output = output + streamer.run(self, layer, dispatch_output, physical_ids)
+             if cpu_share:
+                 output = output + self.sync(x)
+         elif self.tp_rank == 0:
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_dense_v41.py b/python/sglang/srt/layers/moe/kt_gguf_dense_v41.py
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_dense_v41.py
@@ -28241,7 +28255,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf.py b/python/sgla
 +        x = dispatch_output.hidden_states
 +        rows = x.shape[0]
 +        T = rows
-+        if ROW_STEP > 0 and self._pre_T > 0 and rows < self._pre_T:
++        if ROW_STEP > 0 and self._pre_T > 0 and rows < self._pre_T and not getattr(self, "accumulates_into", False):
 +            T = min(self._pre_T, -(-rows // ROW_STEP) * ROW_STEP)
 +        layer_idx = method.kt_config.layer_idx
 +        self._tune_tokens = next_power_of_2(T)
@@ -28343,7 +28357,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf.py b/python/sgla
 diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py
-@@ -0,0 +1,757 @@
+@@ -0,0 +1,772 @@
 +"""GPU-streamed prefill for GGUF CPU experts fed from the GGUF files (NVMe), for hosts whose RAM cannot hold
 +the experts (the 64 GB V4.1-1017 setup: 119 GB of IQ1_M / IQ2_XXS experts, 40 GiB of them in kt-kernel's own
 +RAM cache).
@@ -28545,6 +28559,13 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +        acc.add_(out)
 +
 +
++# the routes of a group go through the MMQ kernels this many at a time: the gathered rows, gate, up and down
++# (about 60 KB a route) stay the same size however long the chunk (0: a group's routes at once)
++MMQ_ROUTES = int(os.environ.get("KT_GGUF_STREAM_MMQ_ROUTES", "8192") or 0)
++# the eager MMQ body adds into the wrapper's output instead of a chunk-sized accumulator of its own
++INTO = os.environ.get("KT_GGUF_STREAM_INTO", "1") == "1"
++
++
 +class _MmqGroup:
 +    """The group body on raw GGUF blocks, run eagerly (no CUDA graph: the routes to a group are gathered
 +    exactly, which needs their count on the host; a dozen launches a group against ~15 s a chunk is nothing):
@@ -28578,38 +28599,32 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +            self._t_inputs = time.perf_counter() - t_in
 +
 +    def _mmq_graph_inputs_(self, T: int, x, physical_ids, topk_weights):
-+        g = self._gin.get(T)
 +        n = x.shape[0]
-+        if g is None:
-+            # one chunk size at a time: the scratch is mapped again at every window's start, and every chunk size
-+            # ever seen kept in it (3 x 117 MB x T/12288) made that mapping fail under a 16 GB card with hot
-+            # experts -- torch_memory_saver's resume ran out of memory and the first touch of the unmapped slot
-+            # was an illegal address (the calibration's 16384-row window, 10-25)
-+            self._gin.clear()
-+            f32, i32, bf16 = torch.float32, torch.int32, torch.bfloat16
-+            g = {
-+                "x": P._scratch_empty((T, self.K), bf16, self.device),
-+                "ids": P._scratch_empty((T, physical_ids.shape[1]), i32, self.device),
-+                "w": P._scratch_empty((T, physical_ids.shape[1]), f32, self.device),
-+                "acc": P._scratch_empty((T, self.K), bf16, self.device),
-+                "out": P._scratch_empty((T, self.K), bf16, self.device),
-+            }
-+            self._gin[T] = g
-+        g["x"][:n].copy_(x)
-+        g["ids"][:n].copy_(physical_ids)
-+        g["w"][:n].copy_(topk_weights)
-+        if n < T:
-+            g["x"][n:].zero_()
-+            g["ids"][n:].fill_(-1)
-+            g["w"][n:].zero_()
-+        g["acc"].zero_()
++        # the body is eager and gathers its routes exactly: no padding rows, and the caller's tensors as they are
++        into = getattr(self, "_into", None)
++        acc = into
++        if acc is None:
++            acc = self._gin.get(n)
++            if acc is None:
++                # one size at a time: the scratch is mapped again at every window's start, and every size ever
++                # seen kept in it made that mapping fail under a 16 GB card with hot experts -- torch_memory_saver's
++                # resume ran out of memory and the first touch of the unmapped slot was an illegal address (10-25)
++                self._gin.clear()
++                acc = P._scratch_empty((n, self.K), torch.bfloat16, self.device)
++                self._gin[n] = acc
++            acc.zero_()
++        g = {"x": x, "ids": physical_ids if physical_ids.dtype == torch.int32 else physical_ids.to(torch.int32),
++             "w": topk_weights, "acc": acc}
++        return self._mmq_sort(g)
++
++    def _mmq_sort(self, g):
 +        # the routes sorted by expert, once a layer: every group takes a slice whose bounds the host knows
 +        # from one transfer here, so the group bodies enqueue without a sync each (torch.nonzero a group
 +        # stalled the host until that group's DMA had landed, which serialized DMA and compute: a layer took
 +        # ~900 ms for ~125 ms of kernels and ~330 ms of copies, 10-25)
 +        flat = g["ids"].reshape(-1)
 +        E = self.E
-+        key = torch.where(flat < 0, torch.full_like(flat, E), flat)  # padding rows last
++        key = torch.where(flat < 0, torch.full_like(flat, E), flat)  # routes to no expert last
 +        order = torch.argsort(key, stable=True)
 +        counts = torch.bincount(key, minlength=E + 1)[:E]
 +        bounds = torch.zeros(E + 1, dtype=torch.int64, device=flat.device)
@@ -28624,14 +28639,20 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +
 +    def _mmq_group_body(self, layer, layer_idx: int, gi: int, base: int, n: int, g):
 +        slot = self.slots[gi % 2]
-+        types, pb = self._layer_types[layer_idx], self._part_bytes[layer_idx]
-+        N, K = self.N, self.K
-+        x, topk_weights, ids32, acc = g["x"], g["w"], g["ids"], g["acc"]
-+        T, topk = ids32.shape
 +        bounds = g["mmq_bounds"]
 +        lo, hi = bounds[base], bounds[base + n]
 +        if hi == lo:
 +            return
++        step = MMQ_ROUTES if MMQ_ROUTES > 0 else hi - lo
++        for blo in range(lo, hi, step):
++            self._mmq_routes(layer_idx, gi, base, n, g, slot, blo, min(hi, blo + step))
++
++    def _mmq_routes(self, layer_idx: int, gi: int, base: int, n: int, g, slot, lo: int, hi: int):
++        """Routes lo..hi of the sorted list (all of them to experts base..base+n) through gate, up and down."""
++        types, pb = self._layer_types[layer_idx], self._part_bytes[layer_idx]
++        N, K = self.N, self.K
++        x, topk_weights, ids32, acc = g["x"], g["w"], g["ids"], g["acc"]
++        T, topk = ids32.shape
 +        r = g["mmq_order"][lo:hi]
 +        t = torch.div(r, topk, rounding_mode="floor")
 +        sidx = r - t * topk
@@ -28649,7 +28670,8 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +        wu = slot.raw[1][:n * pb[1]].view(n, N, rb[1])
 +        wd = slot.raw[2][:n * pb[2]].view(n, K, rb[2])
 +        if self._mmq_sorted:
-+            b32 = g["mmq_bounds32"][base:base + n + 1] - lo
++            # the block's own bounds: each expert's range clipped to lo..hi
++            b32 = (g["mmq_bounds32"][base:base + n + 1] - lo).clamp_(0, hi - lo)
 +            e1 = e.view(-1)
 +            gate = self._mmq.moe_mmq_sorted(xc, wg, e1, b32, types[0], N).view(-1, N)
 +            if prof:
@@ -29032,7 +29054,13 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +
 +    # -- one layer: plan this layer and the next, then the parent's loop -------------------------------
 +
-+    def run(self, method, layer, dispatch_output, physical_ids: torch.Tensor) -> torch.Tensor:
++    @property
++    def accumulates_into(self) -> bool:
++        """run(..., into=output) adds this rank's streamed experts into output and returns it."""
++        return MMQ_ON and INTO
++
++    def run(self, method, layer, dispatch_output, physical_ids: torch.Tensor, into=None) -> torch.Tensor:
++        self._into = into if self.accumulates_into else None
 +        layer_idx = method.kt_config.layer_idx
 +        groups = self._groups(method)
 +        if self._prev_layer is not None:
@@ -29047,6 +29075,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +        try:
 +            acc = super().run(method, layer, dispatch_output, physical_ids)
 +        finally:
++            self._into = None
 +            self._flush_staged()
 +        if nxt is not None:
 +            self._plan_layer(nxt, groups)
