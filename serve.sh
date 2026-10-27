@@ -48,7 +48,7 @@ export KT_GGUF_STREAM_SOURCE="${KT_GGUF_STREAM_SOURCE:-nvme}"
 export KT_GPU_STREAM_PREFILL="${KT_GPU_STREAM_PREFILL:-1024}" KT_GPU_STREAM_EARLY_INIT="${KT_GPU_STREAM_EARLY_INIT:-0}"
 export KT_GPU_STREAM_GROUP="${KT_GPU_STREAM_GROUP:-8}"
 export KT_GGUF_STREAM_MMQ="${KT_GGUF_STREAM_MMQ:-1}"
-export KT_GGUF_STREAM_READERS="${KT_GGUF_STREAM_READERS:-16}" KT_GGUF_STREAM_RING="${KT_GGUF_STREAM_RING:-16}"
+export KT_GGUF_STREAM_RING="${KT_GGUF_STREAM_RING:-16}"
 # wo_a is a GGUF tensor here, not the checkpoint's FP8
 export SGLANG_DSV4_WO_A_FP8_NATIVE="${SGLANG_DSV4_WO_A_FP8_NATIVE:-0}"
 # no expert placement: an expert map makes kt-kernel copy the experts into its arenas instead
@@ -156,8 +156,9 @@ numa_list="$SGLANG_NUMA_NODES"
 node="${numa_list%% *}"
 # kt-kernel's pool on the same node
 export KT_NUMA_NODES="${KT_NUMA_NODES:-$node}"
-# the node's physical cores
-node_cores="$(lscpu -p=CPU,NODE,CORE 2>/dev/null | grep -v '^#' | awk -F, -v n="$node" '$2==n' | sort -t, -k3,3n -u)"
+# the node's physical cores, each as its first hardware thread (the one kt-kernel pins a thread to)
+node_threads="$(lscpu -p=CPU,NODE,CORE 2>/dev/null | grep -v '^#' | awk -F, -v n="$node" '$2==n' | sort -t, -k3,3n -k1,1n)"
+node_cores="$(echo "$node_threads" | awk -F, 'NF && !seen[$3]++')"
 n_node_cores="$(echo "$node_cores" | grep -c . || true)"
 (( n_node_cores > 0 )) || { node_cores=""; n_node_cores="$phys_cores"; }
 
@@ -194,14 +195,51 @@ max_total_tokens="${SGLANG_MAX_TOTAL_TOKENS:-$context_length}"
 # lend would use, and must fit at load)
 gpu_experts="${KT_GPU_EXPERTS:-1}"
 cpu_threads="${KT_CPU_THREADS:-$n_node_cores}"
-# the cache's readers fill it from the file on the node's last cores, the experts compute on the rest
-if [[ -z "${KT_GGUF_PREFETCH_CPUS:-}" && -n "$node_cores" ]] && (( n_node_cores >= 4 )); then
-  spare=$(( n_node_cores >= 16 ? 4 : 1 ))
-  export KT_GGUF_PREFETCH_CPUS="$(echo "$node_cores" | tail -n "$spare" | cut -d, -f1 | paste -sd,)"
-  export KT_GGUF_PREFETCH_THREADS="${KT_GGUF_PREFETCH_THREADS:-$(( spare * 4 ))}"
-  export KT_GGUF_CACHE_PIECE_KIB="${KT_GGUF_CACHE_PIECE_KIB:-512}"
-  [[ -n "${KT_CPU_THREADS:-}" ]] || cpu_threads=$(( n_node_cores - spare ))
+
+# --- the threads that read the drive ---------------------------------------------
+# The expert cache's readers, the hot swaps and the streamed prefill's readers run on KT_IO_CPUS,
+# away from the CPUs the experts compute on (a read that waits for a busy CPU holds up the layer
+# that needs its expert). The engram reads are left to the scheduler (DSV41_ENGRAM_IO_CPUS pins
+# them; pinned, the decode was a few percent slower on some texts).
+# - With SMT: the second hardware threads of the node's last cores, one for every four readers;
+#   the experts compute on every core (on one EPYC 7452 socket, +2 to +10% decode against four
+#   whole cores for the readers, at 64 GB and with every expert in RAM).
+# - Without SMT: the node's last cores, as many as reading the drive at full speed keeps busy;
+#   the experts compute on the rest.
+# The number of readers that fills the drive, and the CPU time a GB of reads takes, come from
+# state/gguf-<name>/io-probe.json, which setup.sh measures (tools/io-probe.py); without it, 16
+# readers on one CPU's worth.
+io_readers="" io_cores=""
+if [[ -f "$state/io-probe.json" ]]; then
+  read -r io_readers io_cores < <("$python" -c "
+import json, math, os
+p = json.load(open('$state/io-probe.json'))
+if os.path.realpath(p['path']) == os.path.realpath('$gguf_dir'):  # measured on this GGUF's drive
+    c = p['pieces']['512']
+    r = c['saturating_threads']
+    row = next(x for x in c['curve'] if x['threads'] == r)
+    print(r, max(1, math.ceil(row['gb_per_s'] * row['cpu_s_per_gb'])))" 2>/dev/null)
 fi
+io_readers="${io_readers:-16}" io_cores="${io_cores:-1}"
+if [[ -z "${KT_IO_CPUS:-}" && -n "$node_cores" ]] && (( n_node_cores >= 4 )); then
+  max_io=$(( n_node_cores / 4 ))
+  siblings="$(echo "$node_threads" | awk -F, 'NF && seen[$3]++ == 1 {print $1}')"
+  if [[ -n "$siblings" ]]; then
+    n_io=$(( (io_readers + 3) / 4 )); (( n_io <= max_io )) || n_io=$max_io
+    KT_IO_CPUS="$(echo "$siblings" | tail -n "$n_io" | paste -sd,)"
+  else
+    n_io=$io_cores; (( n_io <= max_io )) || n_io=$max_io
+    KT_IO_CPUS="$(echo "$node_cores" | tail -n "$n_io" | cut -d, -f1 | paste -sd,)"
+    [[ -n "${KT_CPU_THREADS:-}" ]] || cpu_threads=$(( n_node_cores - n_io ))
+  fi
+fi
+if [[ -n "${KT_IO_CPUS:-}" ]]; then
+  export KT_IO_CPUS
+  export KT_GGUF_PREFETCH_CPUS="${KT_GGUF_PREFETCH_CPUS:-$KT_IO_CPUS}"
+fi
+export KT_GGUF_PREFETCH_THREADS="${KT_GGUF_PREFETCH_THREADS:-$io_readers}"
+export KT_GGUF_STREAM_READERS="${KT_GGUF_STREAM_READERS:-$io_readers}"
+export KT_GGUF_CACHE_PIECE_KIB="${KT_GGUF_CACHE_PIECE_KIB:-512}"
 threadpools="${KT_THREADPOOL_COUNT:-1}"
 deferred_experts="${KT_DEFERRED_EXPERTS:-0}"  # >0 drops expert work for speed; it hurts the text
 mem_fraction="${SGLANG_MEM_FRACTION:-0.81}"
@@ -448,6 +486,7 @@ command=(
 
 printf '%s\n' "DeepSeek-V4.1-Flash-1017 GGUF on SGLang + KTransformers: $gguf_dir"
 printf '%s\n' "GPU ${CUDA_VISIBLE_DEVICES} (sm $cap) on NUMA node $numa_list; CPU experts: $cpu_threads threads; GPU experts $gpu_experts a layer + the hot lend"
+printf '%s\n' "drive reads: $KT_GGUF_PREFETCH_THREADS cache readers and $KT_GGUF_STREAM_READERS prefill readers on CPUs ${KT_IO_CPUS:-(not pinned)}"
 printf '%s\n' "expert cache: $KT_GGUF_EXPERT_CACHE_GIB GiB of the node's ${node_gib} GiB for ${raw_gib} GiB of experts; IQ1_M decode copy: $KT_GGUF_CACHE_IQ1M_T (${copy_gib} GiB)"
 printf '%s\n' "patch tier $tier; context $context_length; attention output FP8 before wo_a: block ${SGLANG_DSV4_O_FP8_QDQ_BLOCK:-0}; KV layout ${SGLANG_DSV4_KV_LAYOUT:-v4}"
 (( tier >= 1 )) && printf '%s\n' "tier-1 features: $( [[ -f "$features_file" ]] && tr '\n' ' ' < "$features_file" || echo all)"

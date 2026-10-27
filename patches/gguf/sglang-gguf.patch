@@ -27978,7 +27978,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf.py b/python/sgla
 diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py
-@@ -0,0 +1,720 @@
+@@ -0,0 +1,737 @@
 +"""GPU-streamed prefill for GGUF CPU experts fed from the GGUF files (NVMe), for hosts whose RAM cannot hold
 +the experts (the 64 GB V4.1-1017 setup: 119 GB of IQ1_M / IQ2_XXS experts, 40 GiB of them in kt-kernel's own
 +RAM cache).
@@ -27998,7 +27998,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +a 12288-token chunk by the GEMMs.
 +
 +Env: KT_GGUF_STREAM_SOURCE=nvme selects this edition (kt_stream_prefill.py's LLAMAFILE dispatch);
-+KT_GGUF_STREAM_READERS (8) reader threads; KT_GGUF_STREAM_RING (6) pinned group buffers; the parent's
++KT_GGUF_STREAM_READERS (8) reader threads, on KT_IO_CPUS when set; KT_GGUF_STREAM_RING (6) pinned group buffers; the parent's
 +KT_GPU_STREAM_PREFILL / KT_GPU_STREAM_GROUP / KT_GPU_STREAM_TIMING apply.
 +"""
 +import collections
@@ -28042,6 +28042,21 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +MMQ_ON = os.environ.get("KT_GGUF_STREAM_MMQ", "0") == "1"
 +RING = int(os.environ.get("KT_GGUF_STREAM_RING", "6"))
 +ALIGN = 4096
++
++
++def _pin_io_thread() -> None:
++    """Run this reader on KT_IO_CPUS ("a,b,c-d", serve.sh sets it): the CPUs every thread that reads the drive
++    shares, apart from the ones computing the experts. Unset: not pinned."""
++    spec = os.environ.get("KT_IO_CPUS", "")
++    cpus = set()
++    for part in filter(None, (p.strip() for p in spec.split(","))):
++        lo, _, hi = part.partition("-")
++        cpus.update(range(int(lo), int(hi or lo) + 1))
++    if cpus:
++        try:
++            os.sched_setaffinity(0, cpus)
++        except OSError as ex:
++            _log(f"reader affinity {spec!r} not set: {ex}")
 +
 +
 +def _log(msg: str):
@@ -28312,7 +28327,9 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +            _MmqGroup._mmq_init(self, layer)
 +        self._tl = {}
 +        self._tm = _TensorMap(self.path)
-+        self._pool = ThreadPoolExecutor(max_workers=READERS, thread_name_prefix="kt-gguf-nvme")
++        self._pool = ThreadPoolExecutor(
++            max_workers=READERS, thread_name_prefix="kt-gguf-nvme", initializer=_pin_io_thread
++        )
 +        self._peek = self._unpin = None
 +        self._cache_bytes = 0
 +        if FROM_CACHE:

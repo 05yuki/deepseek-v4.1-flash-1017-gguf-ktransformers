@@ -28,6 +28,8 @@
 #include <mutex>
 #include <string>
 #include <sys/mman.h>
+#include <pthread.h>
+#include <sched.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -93,7 +95,28 @@ struct Store {
   std::atomic<uint64_t> warm_rows{0}, warm_ns{0};
 };
 
+// DSV41_ENGRAM_IO_CPUS ("a,b,c-d"): the CPUs the engram reads run on. Unset (the
+// default): not pinned. Pinned to the expert cache's readers' CPUs, or to the
+// other second hardware threads of the cores computing the experts, the decode
+// was a few percent slower on some texts than unpinned (dual EPYC 7452, 10-27).
+void pin_io_thread() {
+  const char *e = getenv("DSV41_ENGRAM_IO_CPUS");
+  if (!e || !*e) return;
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  for (const char *p = e; *p;) {
+    char *end;
+    long a = std::strtol(p, &end, 10), b = a;
+    if (end == p) break;
+    if (*end == '-') b = std::strtol(end + 1, &end, 10);
+    for (long c = a; c <= b && c < CPU_SETSIZE; c++) CPU_SET(c, &set);
+    p = *end == ',' ? end + 1 : end;
+  }
+  if (CPU_COUNT(&set)) pthread_setaffinity_np(pthread_self(), sizeof(set), &set);
+}
+
 void io_worker(Store *s) {
+  pin_io_thread();
   for (;;) {
     std::function<void()> job;
     {
@@ -243,6 +266,7 @@ void cache_put(Store *s, uint64_t id, const uint8_t *row) {
 }
 
 void warm_loop(Store *s) {
+  pin_io_thread();
   int n = 16;
   if (const char *e = getenv("DSV41_ENGRAM_WARM_THREADS")) n = std::atoi(e);
   n = std::max(1, std::min(n, 64));
@@ -272,6 +296,7 @@ void warm_loop(Store *s) {
     const auto t0 = std::chrono::steady_clock::now();
     std::atomic<size_t> next{0};
     auto work = [&] {
+      pin_io_thread();
       uint8_t row[kMaxRow];
       for (size_t i; (i = next.fetch_add(1, std::memory_order_relaxed)) < ids.size();) {
         const int64_t id = ids[i];

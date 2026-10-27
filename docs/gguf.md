@@ -32,8 +32,8 @@ A switch marked "on" is on in `serve.sh`.
 `KT_GGUF_EXPERT_CACHE_GIB` (sized by `serve.sh` from the node's memory) is kt-kernel's own RAM tier
 for the experts: an expert's gate, up and down rows are read once from the file with `O_DIRECT`
 into fixed slots on the node and computed from there; when the cache is full, the least recently
-used experts give their slots back. Reader threads on the node's last cores
-(`KT_GGUF_PREFETCH_CPUS`, `KT_GGUF_PREFETCH_THREADS`) keep many reads in flight. The reads bypass
+used experts give their slots back. Reader threads keep many reads in flight
+([Drive reads](#drive-reads) says where they run and how many there are). The reads bypass
 the page cache (plain reads only where the file system refuses `O_DIRECT`), so the cache's size is
 the RAM the experts take.
 
@@ -46,6 +46,40 @@ below.
 
 `kt-llamafile-iq2xs.patch` adds IQ2_XS to the x86 kernels kt-kernel uses (iqk's matrix
 multiplication, from ik_llama.cpp); the pack's IQ2_XS tensors run there.
+
+## Drive reads
+
+Four kinds of threads read the GGUF from the drive: the expert cache's readers, the hot lend's
+swaps, the streamed prefill's readers and the engram reads. `serve.sh` keeps the first three off
+the CPUs the experts compute on, and sizes them from the drive.
+
+- **How many readers.** `setup.sh` runs `tools/io-probe.py` once on the GGUF's drive: random 512 KiB
+  and 2 MiB `O_DIRECT` reads from 1 to 32 threads. It writes `state/gguf-<name>/io-probe.json`.
+  The cache and the prefill each get the fewest readers that reach 90% of the drive's best rate
+  (`KT_GGUF_PREFETCH_THREADS`, `KT_GGUF_STREAM_READERS`).
+- **Where, with SMT.** The readers and the swaps run on the second hardware threads of the node's
+  last cores, one for every four readers (`KT_IO_CPUS`). The experts compute on every core.
+- **Where, without SMT.** The readers and the swaps share the node's last cores, as many as
+  reading the drive at full speed keeps busy (the probe's rate times its CPU time a GB, rounded
+  up). The experts compute on the rest.
+- **The engram reads** are left to the scheduler. `DSV41_ENGRAM_IO_CPUS` pins them; pinned to the
+  readers' CPUs or to the other second hardware threads, the decode was a few percent slower on
+  some texts.
+- **Without a probe** (a setup from before it, or a GGUF moved to another drive), `serve.sh`
+  takes 16 readers: four second hardware threads with SMT, one core without. Remove
+  `state/gguf-<name>/io-probe.json` and run `GGUF=<dir> ./setup.sh` to measure again.
+
+The launch prints the result, e.g. `drive reads: 16 cache readers and 16 prefill readers on CPUs
+92,93,94,95`. Every value can be set by hand: `KT_IO_CPUS`, `DSV41_ENGRAM_IO_CPUS`,
+`KT_CPU_THREADS` and the two reader counts.
+
+What it was measured on, two launches each:
+
+- **One EPYC 7452 socket (SMT), an SN5100 (16 readers).** The experts on all 32 cores and the
+  readers on four second hardware threads decode 2 to 10% faster than with four whole cores given
+  to the readers. That holds at 64 GB and with every expert in RAM. The prefill does not change.
+- **An i5-9600K (6 cores, no SMT), a KIOXIA EXCERIA PLUS G2 (8 readers).** One core stays with the
+  reads. Computing on all six cores decoded 3 to 6% slower.
 
 ## Hot experts on the GPU
 

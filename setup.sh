@@ -5,7 +5,8 @@
 #   .venv                      Python 3.12, requirements.txt, kt-kernel built for this CPU and GPU
 #   engram-adapter/librow_store.so, build/libkv_vmm.so, the GGUF CUDA kernels (.cache/torch_extensions)
 #   state/gguf-<name>/         for GGUF=<dir>: config/ (config.json and tokenizer for SGLang),
-#                              engram/engram-manifest.json, experts.json (the routed experts' bytes)
+#                              engram/engram-manifest.json, experts.json (the routed experts' bytes),
+#                              io-probe.json (how the drive under the GGUF answers reads)
 #
 # usage: GGUF=<dir with the GGUF shards and the Engram file> [BASE=<dir>] ./setup.sh
 #
@@ -206,6 +207,9 @@ if [[ -n "${GGUF:-}" ]]; then
   step "engram manifest and expert sizes for $gguf_dir"
   [[ -f "$out/engram/engram-manifest.json" ]] || "$py" tools/make-engram-manifest-gguf.py "$gguf_dir" "$out/engram"
   [[ -f "$out/experts.json" ]] || "$py" tools/gguf-expert-bytes.py "$gguf_dir" "$out/experts.json"
+  # serve.sh sizes the threads that read the drive from this (about a minute; only reads)
+  step "drive under $gguf_dir (tools/io-probe.py)"
+  [[ -f "$out/io-probe.json" ]] || "$py" tools/io-probe.py "$gguf_dir" "$out/io-probe.json"
 fi
 
 step "check: the attention-output FP8 kernel on this GPU"

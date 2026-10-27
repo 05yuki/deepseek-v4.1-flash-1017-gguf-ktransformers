@@ -85,7 +85,9 @@ The server speaks SGLang's OpenAI-compatible API on `127.0.0.1:8080`, one reques
      deepseek-ai/DeepSeek-V4.1-Flash-1017 (a few MB, no weights; `BASE=<dir>` takes them from a
      local copy), with `quantization_config` set to GGUF (`tools/make-gguf-config.py`);
    - `engram/engram-manifest.json`: where each engram table lies in the Engram GGUF;
-   - `experts.json`: the routed experts' bytes, for the cache size.
+   - `experts.json`: the routed experts' bytes, for the cache size;
+   - `io-probe.json`: how fast the drive under the GGUF reads, and from how many threads
+     (`tools/io-probe.py`, about a minute, reads only).
 
 Each patch is checked against its pinned tree before it is applied. Re-running skips the
 finished steps.
@@ -102,6 +104,8 @@ overridden by the variable named next to it. Logs go to `logs/<GGUF dir name>/<t
   to most; the swapped experts' rows are read in the background and copied on a side stream
 - the prefill lends the dense weights' memory and the KV pool's free pages to its chunk, and
   streams the experts' GGUF rows from the drive to the GPU
+- the threads that read the drive run away from the ones computing the experts, sized from a
+  measurement of the drive that `setup.sh` takes ([docs/gguf.md](docs/gguf.md#drive-reads))
 - V4.1's tool-call and reasoning parsers, as in the MXFP4 recipe
 
 ## Results
