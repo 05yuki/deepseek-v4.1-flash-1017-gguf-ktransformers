@@ -6,7 +6,7 @@ with [SGLang](https://github.com/sgl-project/sglang) and [KTransformers](https:/
 
 It needs one 16 GB GPU, one CPU socket and 64 GB of RAM.
 
-More RAM makes the decode faster: 1.6 to 2.1 times the 64 GB speed once every expert fits.
+More RAM makes the decode faster: 1.7 to 2.1 times the 64 GB speed once every expert fits.
 
 Where each part runs:
 
@@ -111,11 +111,13 @@ overridden by the variable named next to it. Logs go to `logs/<GGUF dir name>/<t
 
 ## Results
 
-AMD EPYC 7452 (Zen 2, AVX2, one of two sockets: 32 cores, 256 GB DDR4), one RTX 5070 Ti
-16 GB, the IQ2_XXS build on one NVMe drive; built from this repository and run with the
-`serve.sh` defaults (131,072-token context, one request at a time), measured with `tools/bench.py`,
-every column from one launch, after one warm-up pass of the same prompts (the first pass fills the
-expert cache from the drive).
+AMD EPYC 7452 (Zen 2, AVX2, one of two sockets: 32 cores, 256 GB DDR4), one RTX 5070 Ti 16 GB.
+The IQ2_XXS build sits on one NVMe drive.
+The server is built from this repository and run with the `serve.sh` defaults on one GPU
+(`CUDA_VISIBLE_DEVICES=0`; 131,072-token context, one request at a time).
+`tools/bench.py` measures it.
+Every column comes from one launch, after one warm-up pass of the same prompts.
+The first pass fills the expert cache from the drive.
 
 The 64 GB and 128 GB columns are that socket under a memory limit,
 `systemd-run --user --scope -p MemoryMax=64G -p MemorySwapMax=0 ./serve.sh` (or `128G`), not a
@@ -132,25 +134,29 @@ Decode, 1,024 tokens a reply, tok/s (`--other-text` for the rows below the first
 
 | text | 64 GB | 128 GB | 251 GiB |
 |---|---|---|---|
-| Japanese prose (median of four prompts) | 24.2 | 33.0 | 39.2 |
-| JSON | 17.8 | 22.9 | 30.1 |
-| Chinese prose | 17.3 | 27.7 | 32.3 |
-| math | 17.3 | 23.3 | 30.3 |
-| English prose | 17.1 | 24.8 | 30.4 |
-| Python code | 13.0 | 20.9 | 27.4 |
-| English technical prose | 12.8 | 20.9 | 25.8 |
+| Japanese prose (median of four prompts) | 25.7 | 33.4 | 43.5 |
+| JSON | 18.3 | 24.3 | 31.0 |
+| Chinese prose | 17.9 | 28.6 | 34.1 |
+| English prose | 17.3 | 25.2 | 31.1 |
+| math | 17.3 | 24.8 | 31.2 |
+| Python code | 13.6 | 21.5 | 27.6 |
+| English technical prose | 13.3 | 21.2 | 27.9 |
 
 Prefill, one prompt of random token ids:
 
 | prompt (tokens) | 64 GB | 128 GB | 251 GiB |
 |---|---|---|---|
-| 35,000 | 1,249 tok/s (28 s) | 1,844 tok/s (19 s) | 2,010 tok/s (17 s) |
+| 35,000 | 1,268 tok/s (28 s) | 1,855 tok/s (19 s) | 2,010 tok/s (17 s) |
 
-The misses go to the drive: at 128 GB one expert read in fifty-five misses and the decode is already
-1.3 to 1.6 times the 64 GB one; the rest of the way comes with the last 11% of the experts and the
-IQ1_M decode copy. Outside prefill the hot lend holds 20-21 more experts a layer on the GPU (805-833
-slots with all experts in RAM, in 6.6 GiB the driver had free), swapped for what the text routes to; Japanese prose runs fastest because its routes gather on fewer experts, so the slots and
-the cache take more of them.
+The misses go to the drive.
+At 128 GB one expert read in fifty-five misses, and the decode is already 1.3 to 1.6 times the 64 GB one.
+The rest of the way comes with the last 11% of the experts and the IQ1_M decode copy.
+
+Outside prefill the hot lend holds 19 to 21 more experts a layer on the GPU.
+With all experts in RAM that was 799 to 827 slots, in the 6.6 to 6.7 GiB the driver had free.
+The slots are swapped for the experts the text routes to.
+Japanese prose runs fastest: its routes gather on fewer experts, so the slots and the cache take
+more of them.
 
 ### Two GPUs and two sockets
 
