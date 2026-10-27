@@ -99,21 +99,42 @@ if [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
 else
   mapfile -t gpus < <(nvidia-smi --query-gpu=index --format=csv,noheader)
 fi
-# one GPU: the GGUF experts' blocks do not split across tensor-parallel ranks
-if (( ${#gpus[@]} > 1 )); then
-  echo "one GPU per server: using GPU ${gpus[0]} (set CUDA_VISIBLE_DEVICES to pick another)" >&2
-  gpus=("${gpus[0]}")
+# Every visible GPU, tensor parallel (KT_GGUF_TP=<n>: the first n). The dense layers split over the
+# GPUs; the routed experts do not (a GGUF block cannot be cut), so each GPU streams and holds whole
+# experts, its own share (the patch's KT_GGUF_STREAM_EP and KT_GGUF_HOT_EP). What the GPUs share is
+# set by the weakest of them: the oldest architecture, the smallest memory.
+if [[ "${KT_GGUF_TP:-}" =~ ^[0-9]+$ ]] && (( KT_GGUF_TP >= 1 && KT_GGUF_TP < ${#gpus[@]} )); then
+  gpus=("${gpus[@]:0:KT_GGUF_TP}")
 fi
-n_gpus=1
-tp=1
-cap="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i "${gpus[0]}" | head -1)"
+n_gpus="${#gpus[@]}"
+tp="$n_gpus"
+caps=() vrams=() gpu_nodes=()
+for g in "${gpus[@]}"; do
+  caps+=("$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i "$g" | head -1)")
+  vrams+=("$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "$g" | head -1)")
+  bus="$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader -i "$g" | head -1 | tr 'A-F' 'a-f')"
+  n="$(cat "/sys/bus/pci/devices/${bus#0000}/numa_node" 2>/dev/null || cat "/sys/bus/pci/devices/${bus:4}/numa_node" 2>/dev/null || echo -1)"
+  (( n >= 0 )) 2>/dev/null || n=0
+  gpu_nodes+=("$n")
+done
+# cards of different sizes: SGLang refuses ranks whose free memory differs by more than 10%
+# unless told this is meant (each rank then takes the smaller card's share)
+if (( $(printf '%s\n' "${vrams[@]}" | sort -u | wc -l) > 1 )); then
+  export SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK="${SGLANG_ENABLE_TP_MEMORY_INBALANCE_CHECK:-0}"
+fi
+# the lowest compute capability, and whether any GPU is Turing or Ada
+cap="$(printf '%s\n' "${caps[@]}" | sort -t. -k1,1n -k2,2n | head -1)"
+any_cap() { local c; for c in "${caps[@]}"; do [[ "$c" == "$1" ]] && return 0; done; return 1; }
 # Tier 0 supplies a portable Triton attention fallback for Ada (SM89); the GGUF patch takes it to
 # Turing (SM75). Other pre-Hopper architectures remain unsupported; do not load the model first.
-if [[ "$cap" != "8.9" && "$cap" != "7.5" && "${cap%%.*}" =~ ^[0-9]+$ ]] && (( ${cap%%.*} < 9 )); then
-  echo "GPU ${gpus[0]} is compute capability $cap: attention needs SM75 (Turing), SM89 (Ada) or SM90+" >&2
-  exit 3
-fi
-if [[ "$cap" == "8.9" || "$cap" == "7.5" ]]; then
+for i in "${!gpus[@]}"; do
+  c="${caps[$i]}"
+  if [[ "$c" != "8.9" && "$c" != "7.5" && "${c%%.*}" =~ ^[0-9]+$ ]] && (( ${c%%.*} < 9 )); then
+    echo "GPU ${gpus[$i]} is compute capability $c: attention needs SM75 (Turing), SM89 (Ada) or SM90+" >&2
+    exit 3
+  fi
+done
+if any_cap 8.9 || any_cap 7.5; then
   # Ada and Turing use the portable indexer and mHC paths as well as sparse attention.
   # The DeepGEMM and TileLang alternatives require newer GPU architectures.
   export SGLANG_OPT_USE_TOPK_V2="${SGLANG_OPT_USE_TOPK_V2:-0}"
@@ -122,7 +143,7 @@ if [[ "$cap" == "8.9" || "$cap" == "7.5" ]]; then
   export SGLANG_FP8_PAGED_MQA_LOGITS_TORCH="${SGLANG_FP8_PAGED_MQA_LOGITS_TORCH:-1}"
 fi
 sm75_bf16=0
-if [[ "$cap" == "7.5" ]]; then
+if any_cap 7.5; then
   # Turing keeps the model in bf16 (DSV4's JIT kernels take no fp16; the tensor-core dots go
   # through fp32), and the GGUF dense layers' prefill runs on MMQ in their GGUF types (the bf16
   # copy path needs a bf16 cuBLAS GEMM, SM80+)
@@ -135,7 +156,8 @@ if [[ "$cap" == "7.5" ]]; then
   export SGLANG_CHUNKED_PREFILL_SIZE="${SGLANG_CHUNKED_PREFILL_SIZE:-2048}"
 fi
 # 131,072 tokens; a card under 12 GB (an 8 GB RTX 20) keeps 32,768, its room after the weights
-vram_mib="$(nvidia-smi --query-gpu=memory.total --format=csv,noheader,nounits -i "${gpus[0]}" | head -1)"
+# (the smallest card: every rank holds the same share of the KV pool)
+vram_mib="$(printf '%s\n' "${vrams[@]}" | sort -n | head -1)"
 if [[ "$vram_mib" =~ ^[0-9]+$ ]] && (( vram_mib < 12288 )); then
   export SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-32768}"
 else
@@ -145,22 +167,22 @@ n_nodes="$(ls -d /sys/devices/system/node/node[0-9]* 2>/dev/null | wc -l)"
 (( n_nodes > 0 )) || n_nodes=1
 phys_cores="$(lscpu -p=CORE,SOCKET 2>/dev/null | grep -v '^#' | sort -u | wc -l)"
 (( phys_cores > 0 )) || phys_cores="$(nproc)"
-# the NUMA node the GPU hangs off (SGLANG_NUMA_NODES=<n> picks one)
-if [[ -z "${SGLANG_NUMA_NODES:-}" ]]; then
-  bus="$(nvidia-smi --query-gpu=pci.bus_id --format=csv,noheader -i "${gpus[0]}" | head -1 | tr 'A-F' 'a-f')"
-  gpu_node="$(cat "/sys/bus/pci/devices/${bus#0000}/numa_node" 2>/dev/null || cat "/sys/bus/pci/devices/${bus:4}/numa_node" 2>/dev/null || echo -1)"
-  (( gpu_node >= 0 )) 2>/dev/null || gpu_node=0
-  SGLANG_NUMA_NODES="$gpu_node"
-fi
-numa_list="$SGLANG_NUMA_NODES"
-node="${numa_list%% *}"
-# kt-kernel's pool on the same node
-export KT_NUMA_NODES="${KT_NUMA_NODES:-$node}"
-# the node's physical cores, each as its first hardware thread (the one kt-kernel pins a thread to)
-node_threads="$(lscpu -p=CPU,NODE,CORE 2>/dev/null | grep -v '^#' | awk -F, -v n="$node" '$2==n' | sort -t, -k3,3n -k1,1n)"
-node_cores="$(echo "$node_threads" | awk -F, 'NF && !seen[$3]++')"
-n_node_cores="$(echo "$node_cores" | grep -c . || true)"
-(( n_node_cores > 0 )) || { node_cores=""; n_node_cores="$phys_cores"; }
+# each rank on the NUMA node its GPU hangs off (SGLANG_NUMA_NODES="<n> ..." picks them, one a rank)
+numa_list="${SGLANG_NUMA_NODES:-${gpu_nodes[*]}}"
+# kt-kernel's CPU experts: one pool on each of those nodes
+nodes=()
+for n in $numa_list; do [[ " ${nodes[*]} " == *" $n "* ]] || nodes+=("$n"); done
+node="${nodes[0]}"
+export KT_NUMA_NODES="${KT_NUMA_NODES:-$(IFS=,; echo "${nodes[*]}")}"
+# a node's physical cores, each as its first hardware thread (the one kt-kernel pins a thread to)
+node_threads_of() { lscpu -p=CPU,NODE,CORE 2>/dev/null | grep -v '^#' | awk -F, -v n="$1" '$2==n' | sort -t, -k3,3n -k1,1n; }
+n_node_cores=0
+for n in "${nodes[@]}"; do
+  c="$(node_threads_of "$n" | awk -F, 'NF && !seen[$3]++' | grep -c . || true)"
+  n_node_cores=$(( n_node_cores + c ))
+done
+have_cores=1
+(( n_node_cores > 0 )) || { have_cores=0; n_node_cores="$phys_cores"; }
 
 # --- the expert cache ---------------------------------------------------------
 # kt-kernel keeps the experts' GGUF rows it has read in RAM on the node, up to
@@ -169,11 +191,16 @@ n_node_cores="$(echo "$node_cores" | grep -c . || true)"
 # KT_GGUF_HOST_RESERVE_GIB for everything else. When the node holds every expert and their
 # IQ1_M decode copy, the copy is kept too (KT_GGUF_CACHE_IQ1M_T=1: faster CPU decode for the
 # IQ1_M layers, at 76 more bytes a block of 256); otherwise the raw rows only.
-node_gib="$(awk '/MemTotal/ {printf "%d", $4 / 1048576}' "/sys/devices/system/node/node$node/meminfo" 2>/dev/null || true)"
-node_gib="${node_gib:-$(awk '/MemTotal/ {printf "%d", $2 / 1048576}' /proc/meminfo)}"
+node_gib=0
+for n in "${nodes[@]}"; do
+  g="$(awk '/MemTotal/ {printf "%d", $4 / 1048576}' "/sys/devices/system/node/node$n/meminfo" 2>/dev/null || true)"
+  node_gib=$(( node_gib + ${g:-0} ))
+done
+(( node_gib > 0 )) || node_gib="$(awk '/MemTotal/ {printf "%d", $2 / 1048576}' /proc/meminfo)"
 cg_max="$(cat "/sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup | head -1)/memory.max" 2>/dev/null || echo max)"
 if [[ "$cg_max" =~ ^[0-9]+$ ]] && (( cg_max / 1073741824 < node_gib )); then node_gib=$(( cg_max / 1073741824 )); fi
-budget_gib=$(( node_gib - ${KT_GGUF_HOST_RESERVE_GIB:-18} ))
+# what everything else takes: 18 GiB, and as much again for each more rank
+budget_gib=$(( node_gib - ${KT_GGUF_HOST_RESERVE_GIB:-18} * tp ))
 read -r raw_gib copy_gib < <("$python" -c "
 import json, math; e = json.load(open('$state/experts.json'))
 print(math.ceil(e['raw_bytes'] / 2**30), math.ceil(e['iq1m_copy_bytes'] / 2**30))")
@@ -185,7 +212,18 @@ export KT_GGUF_CACHE_IQ1M_T
 want_gib=$(( raw_gib + 4 + (KT_GGUF_CACHE_IQ1M_T == 1 ? copy_gib : 0) ))
 cache_gib=$(( want_gib < budget_gib ? want_gib : budget_gib ))
 export KT_GGUF_EXPERT_CACHE_GIB="${KT_GGUF_EXPERT_CACHE_GIB:-$cache_gib}"
-(( KT_GGUF_EXPERT_CACHE_GIB >= 8 )) || { echo "node $node has ${node_gib} GiB: too little for the expert cache (KT_GGUF_EXPERT_CACHE_GIB)" >&2; exit 5; }
+(( KT_GGUF_EXPERT_CACHE_GIB >= 8 )) || { echo "nodes ${nodes[*]} have ${node_gib} GiB: too little for the expert cache (KT_GGUF_EXPERT_CACHE_GIB)" >&2; exit 5; }
+if (( tp > 1 )); then
+  # the shared expert whole on every rank: its down projection's 2304 inputs split in two are
+  # 1152, not a whole number of 256-value GGUF blocks (+0.5 GB a GPU)
+  export SGLANG_SHARED_EXPERT_TP1="${SGLANG_SHARED_EXPERT_TP1:-1}"
+  # kt-kernel's cache holds each expert split over its pools, which no rank's prefill can read
+  # whole: the prefill reads the GGUF through the page cache when RAM holds the experts once
+  # more (from the drive, O_DIRECT, otherwise)
+  if [[ -z "${KT_GGUF_STREAM_DIRECT:-}" ]] && (( budget_gib >= KT_GGUF_EXPERT_CACHE_GIB + raw_gib + 8 )); then
+    export KT_GGUF_STREAM_DIRECT=0
+  fi
+fi
 
 # --- model and memory -------------------------------------------------------
 context_length="${SGLANG_CONTEXT_LENGTH:-1048576}"
@@ -221,17 +259,28 @@ if os.path.realpath(p['path']) == os.path.realpath('$gguf_dir'):  # measured on 
     print(r, max(1, math.ceil(row['gb_per_s'] * row['cpu_s_per_gb'])))" 2>/dev/null)
 fi
 io_readers="${io_readers:-16}" io_cores="${io_cores:-1}"
-if [[ -z "${KT_IO_CPUS:-}" && -n "$node_cores" ]] && (( n_node_cores >= 4 )); then
-  max_io=$(( n_node_cores / 4 ))
-  siblings="$(echo "$node_threads" | awk -F, 'NF && seen[$3]++ == 1 {print $1}')"
-  if [[ -n "$siblings" ]]; then
-    n_io=$(( (io_readers + 3) / 4 )); (( n_io <= max_io )) || n_io=$max_io
-    KT_IO_CPUS="$(echo "$siblings" | tail -n "$n_io" | paste -sd,)"
-  else
-    n_io=$io_cores; (( n_io <= max_io )) || n_io=$max_io
-    KT_IO_CPUS="$(echo "$node_cores" | tail -n "$n_io" | cut -d, -f1 | paste -sd,)"
-    [[ -n "${KT_CPU_THREADS:-}" ]] || cpu_threads=$(( n_node_cores - n_io ))
-  fi
+if [[ -z "${KT_IO_CPUS:-}" ]] && (( have_cores )); then
+  # on each node: the readers that node's ranks start
+  io=() compute=0
+  for n in "${nodes[@]}"; do
+    threads="$(node_threads_of "$n")"
+    cores="$(echo "$threads" | awk -F, 'NF && !seen[$3]++')"
+    nc="$(echo "$cores" | grep -c . || true)"
+    if (( nc < 4 )); then compute=$(( compute + nc )); continue; fi
+    max_io=$(( nc / 4 ))
+    siblings="$(echo "$threads" | awk -F, 'NF && seen[$3]++ == 1 {print $1}')"
+    if [[ -n "$siblings" ]]; then
+      n_io=$(( (io_readers + 3) / 4 )); (( n_io <= max_io )) || n_io=$max_io
+      io+=($(echo "$siblings" | tail -n "$n_io"))
+      compute=$(( compute + nc ))
+    else
+      n_io=$io_cores; (( n_io <= max_io )) || n_io=$max_io
+      io+=($(echo "$cores" | tail -n "$n_io" | cut -d, -f1))
+      compute=$(( compute + nc - n_io ))
+    fi
+  done
+  (( ${#io[@]} )) && KT_IO_CPUS="$(IFS=,; echo "${io[*]}")"
+  [[ -n "${KT_CPU_THREADS:-}" ]] || cpu_threads=$compute
 fi
 if [[ -n "${KT_IO_CPUS:-}" ]]; then
   export KT_IO_CPUS
@@ -240,7 +289,7 @@ fi
 export KT_GGUF_PREFETCH_THREADS="${KT_GGUF_PREFETCH_THREADS:-$io_readers}"
 export KT_GGUF_STREAM_READERS="${KT_GGUF_STREAM_READERS:-$io_readers}"
 export KT_GGUF_CACHE_PIECE_KIB="${KT_GGUF_CACHE_PIECE_KIB:-512}"
-threadpools="${KT_THREADPOOL_COUNT:-1}"
+threadpools="${KT_THREADPOOL_COUNT:-${#nodes[@]}}"
 deferred_experts="${KT_DEFERRED_EXPERTS:-0}"  # >0 drops expert work for speed; it hurts the text
 mem_fraction="${SGLANG_MEM_FRACTION:-0.81}"
 kv_cache_dtype="${SGLANG_KV_CACHE_DTYPE:-fp8_e4m3}"
@@ -259,7 +308,9 @@ source "$here/tools/o-fp8-qdq-block.sh"
 # values in FP8 blocks of 32, the RoPE part too, and the compressed KV in FP4 blocks of 16.
 # SGLang reads them on SM100 and, with this repository, on SM120 / SM121; other GPUs keep the
 # V4 layout (v4: the V4 layout everywhere)
-if [[ -z "${SGLANG_DSV4_KV_LAYOUT:-}" ]] && [[ "${cap%%.*}" == 10 || "${cap%%.*}" == 12 ]]; then
+all_v41_kv=1
+for c in "${caps[@]}"; do [[ "${c%%.*}" == 10 || "${c%%.*}" == 12 ]] || all_v41_kv=0; done
+if [[ -z "${SGLANG_DSV4_KV_LAYOUT:-}" ]] && (( all_v41_kv )); then
   export SGLANG_DSV4_KV_LAYOUT=v41
 fi
 # wo_a stays in the checkpoint's FP8 (32x32 E8M0 blocks) instead of a bf16 copy (0: bf16)
@@ -418,10 +469,14 @@ mkdir -p "$run_dir"
 export CUDA_DEVICE_ORDER=PCI_BUS_ID
 export CUDA_VISIBLE_DEVICES="$(IFS=,; echo "${gpus[*]}")"
 export NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE:-1}" NCCL_IB_DISABLE="${NCCL_IB_DISABLE:-1}" NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
-arch_a="$cap"
-case "$cap" in 9.0|10.0|10.3|12.0|12.1) arch_a="${cap}a" ;; esac
-export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-$cap+PTX}"
-export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-$arch_a}"
+# the kernels built at run time: every GPU's architecture
+arch_list=() arch_a_list=()
+for c in $(printf '%s\n' "${caps[@]}" | sort -u -t. -k1,1n -k2,2n); do
+  arch_list+=("$c")
+  case "$c" in 9.0|10.0|10.3|12.0|12.1) arch_a_list+=("${c}a") ;; *) arch_a_list+=("$c") ;; esac
+done
+export TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-$(IFS=';'; echo "${arch_list[*]}")+PTX}"
+export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-${arch_a_list[*]}}"
 export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
 export PATH="$CUDA_HOME/bin:$venv/bin:$PATH"
 # compiled-kernel caches kept in this checkout: another checkout's torch builds
@@ -485,9 +540,9 @@ command=(
 )
 
 printf '%s\n' "DeepSeek-V4.1-Flash-1017 GGUF on SGLang + KTransformers: $gguf_dir"
-printf '%s\n' "GPU ${CUDA_VISIBLE_DEVICES} (sm $cap) on NUMA node $numa_list; CPU experts: $cpu_threads threads; GPU experts $gpu_experts a layer + the hot lend"
+printf '%s\n' "GPU ${CUDA_VISIBLE_DEVICES} (sm $(IFS=,; echo "${caps[*]}"), $(IFS=,; echo "${vrams[*]}") MiB), TP $tp on NUMA nodes $numa_list; CPU experts: $cpu_threads threads in $threadpools pools; GPU experts $gpu_experts a layer + the hot lend"
 printf '%s\n' "drive reads: $KT_GGUF_PREFETCH_THREADS cache readers and $KT_GGUF_STREAM_READERS prefill readers on CPUs ${KT_IO_CPUS:-(not pinned)}"
-printf '%s\n' "expert cache: $KT_GGUF_EXPERT_CACHE_GIB GiB of the node's ${node_gib} GiB for ${raw_gib} GiB of experts; IQ1_M decode copy: $KT_GGUF_CACHE_IQ1M_T (${copy_gib} GiB)"
+printf '%s\n' "expert cache: $KT_GGUF_EXPERT_CACHE_GIB GiB of nodes ${nodes[*]}'s ${node_gib} GiB for ${raw_gib} GiB of experts; IQ1_M decode copy: $KT_GGUF_CACHE_IQ1M_T (${copy_gib} GiB)"
 printf '%s\n' "patch tier $tier; context $context_length; attention output FP8 before wo_a: block ${SGLANG_DSV4_O_FP8_QDQ_BLOCK:-0}; KV layout ${SGLANG_DSV4_KV_LAYOUT:-v4}"
 (( tier >= 1 )) && printf '%s\n' "tier-1 features: $( [[ -f "$features_file" ]] && tr '\n' ' ' < "$features_file" || echo all)"
 (( tier >= 1 )) && printf '%s\n' "wo_a native FP8: $SGLANG_DSV4_WO_A_FP8_NATIVE; vision tower on demand: $SGLANG_DSV4_VISION_ON_DEMAND; MXFP4 MoE fp32: $SGLANG_MXFP4_MOE_FP32; Marlin MoE fp32 glue: $SGLANG_MARLIN_MOE_FP32_GLUE; CPU scale codes: $KT_MXFP4_SCALE_CODES; hot lend spare floor: ${KT_KV_HOT_SPARE_FLOOR_MB:-off} MiB; dynamic hot slots: ${KT_KV_HOT_DYNAMIC_SLOTS:-0}, resident rows too: ${KT_KV_HOT_DYNAMIC_RESIDENT:-0}"

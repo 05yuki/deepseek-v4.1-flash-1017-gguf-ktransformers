@@ -45,10 +45,11 @@ The server speaks SGLang's OpenAI-compatible API on `127.0.0.1:8080`, one reques
   ([below](#an-rtx-2070-8-gb-and-a-6-core-desktop-cpu)). The dense layers in their GGUF types take
   6.8 GB; the rest is the KV pool (131,072 tokens by default, 32,768 on a card under 12 GB;
   `SGLANG_CONTEXT_LENGTH`) and working room that the prefill chunk and the extra hot experts take. With several GPUs
-  visible, `serve.sh` takes the first (`CUDA_VISIBLE_DEVICES` picks another): the GGUF
-  experts do not split across tensor-parallel ranks.
-- **CPU and RAM: the socket the GPU hangs off.** `serve.sh` runs the experts on that NUMA
-  node's physical cores and sizes the expert cache from its memory:
+  visible, `serve.sh` uses them all ([below](#two-gpus-and-two-sockets)).
+  `CUDA_VISIBLE_DEVICES` or `KT_GGUF_TP` picks fewer.
+- **CPU and RAM: the socket the GPU hangs off** (with several GPUs, each GPU's socket).
+  `serve.sh` runs the experts on that NUMA node's physical cores and sizes the expert cache
+  from its memory:
   - 64 GB of RAM is enough; more is faster. The cache holds the experts' GGUF rows (124 GiB for
     IQ2_XXS) as far as the node has room, less 18 GiB for everything else
     (`KT_GGUF_HOST_RESERVE_GIB`); what does not fit is read from the file again when it is
@@ -94,7 +95,7 @@ finished steps.
 
 ## What serve.sh does
 
-At start it reads the GPU, its NUMA node, the node's cores and memory, and sets the CPU threads,
+At start it reads each GPU, its NUMA node, the node's cores and memory, and sets the CPU threads,
 the expert cache and the CUDA arch from them. The first launch of a setup also calibrates the
 prefill chunk (the server starts one extra time). Every default is in the script and can be
 overridden by the variable named next to it. Logs go to `logs/<GGUF dir name>/<timestamp>/`.
@@ -151,6 +152,25 @@ IQ1_M decode copy. Outside prefill the hot lend holds 20-21 more experts a layer
 slots with all experts in RAM, in 6.6 GiB the driver had free), swapped for what the text routes to; Japanese prose runs fastest because its routes gather on fewer experts, so the slots and
 the cache take more of them.
 
+### Two GPUs and two sockets
+
+Both EPYC 7452 sockets (64 cores, 512 GB) and two RTX 5070 Ti 16 GB, the same drive and build.
+`serve.sh` with no settings takes both GPUs, one rank on each socket.
+The expert cache holds every expert and the IQ1_M decode copy (204 GiB).
+How the two GPUs share the work is in [docs/gguf.md](docs/gguf.md#two-or-more-gpus).
+
+| text | decode, tok/s |
+|---|---|
+| Japanese prose (median of four prompts) | 61.8 |
+| English prose | 41.7 |
+| JSON | 41.3 |
+| math | 39.5 |
+| Chinese prose | 38.2 |
+| Python code | 36.6 |
+| English technical prose | 36.6 |
+
+A 35,000-token prompt prefills at 2,759 tok/s (13 s).
+
 ### An RTX 2070 8 GB and a 6-core desktop CPU
 
 Intel Core i5-9600K (6 cores, AVX2, two-channel DDR4), one RTX 2070 8 GB (Turing, SM75), the pack on
@@ -178,6 +198,7 @@ teacher-forced.
 | reference (`inference/model.py`, the FP8 checkpoint) | 0.7185 | |
 | served, the IQ2_XXS GGUF | 1.0479 | +0.329 (0.054) |
 | served, the IQ2_XXS GGUF on the RTX 2070 (`KT_GPU_EXPERTS=0`) | 1.0468 | +0.328 (0.053) |
+| served, the IQ2_XXS GGUF on two GPUs and two sockets | 1.0485 | +0.330 (0.054) |
 
 The difference is the GGUF's quantization, not the serving: served with only the routed experts
 from the GGUF (the dense layers and the engram from the FP8 checkpoint) the NLL is +0.312 above the
@@ -206,7 +227,7 @@ python tools/nll.py compare ref.json served.json
 - Other GPUs than SM120 and SM75: the GGUF kernels build for the GPU's own arch, but only an RTX
   5070 Ti and an RTX 2070 were run. V100 (SM70) would take a CUDA 12 build of the stack (CUDA 13
   has no SM70).
-- More than one GPU: not supported (the GGUF expert blocks do not split across ranks).
+- Two GPUs of different architectures: should work, not run.
 - The IQ1_M and IQ2_XS builds of the pack: their types are all supported, but only IQ2_XXS was
   measured.
 - CPUs other than Zen 2 and Coffee Lake (i5-9600K).

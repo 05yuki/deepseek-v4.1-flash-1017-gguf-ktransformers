@@ -810,7 +810,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_dequant.py b/python/sglang/srt/
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_hot.py b/python/sglang/srt/layers/moe/kt_gguf_hot.py
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_hot.py
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,330 @@
 +"""Hot GPU experts straight from a GGUF, for the KT hybrid (--kt-method
 +LLAMAFILE with KT_GGUF_DENSE): the GPU slots 0..num_gpu_experts-1 hold this
 +rank's TP slice of the expert's raw GGUF blocks, and decode runs SGLang's
@@ -986,6 +986,10 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_hot.py b/python/sglang/srt/laye
 +        self.num_gpu_experts = kt_config.num_gpu_experts
 +        self.reader = _reader(kt_config.weight_path)
 +        self.rank, self.world = layer.moe_tp_rank, layer.moe_tp_size
++        # KT_GGUF_HOT_EP (on with more than one rank): whole experts on every rank, not a TP slice of each (a GGUF
++        # block of 256 values cannot be cut); kt_kv_hot_lend gives each rank its own experts' routes
++        self.ep = self.world > 1 and os.environ.get("KT_GGUF_HOT_EP", "1") == "1"
++        self.slice_rank = 0 if self.ep else self.rank
 +        self.types = self.reader.types(kt_config.layer_idx)
 +        if self.types[0] != self.types[1]:
 +            raise RuntimeError(f"layer {kt_config.layer_idx}: gate {self.types[0]} and up {self.types[1]} differ")
@@ -1005,8 +1009,10 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_hot.py b/python/sglang/srt/laye
 +    def create_weights(self, layer, num_experts, hidden_size, intermediate_size_per_partition, params_dtype,
 +                       **extra_weight_attrs):
 +        E, N, K = num_experts, intermediate_size_per_partition, hidden_size
++        if self.ep:
++            N = N * self.world
 +        self.N, self.K = N, K
-+        if N * self.world != self.reader.inter or K != self.reader.K:
++        if (N if self.ep else N * self.world) != self.reader.inter or K != self.reader.K:
 +            raise RuntimeError(f"GGUF experts {self.reader.inter}x{self.reader.K} vs layer {N}x{self.world} / {K}")
 +        if E == 0:
 +            return
@@ -1038,11 +1044,11 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_hot.py b/python/sglang/srt/laye
 +        E = int(p2l.numel())
 +        t0 = time.time()
 +        li, N = self.kt_config.layer_idx, self.N
-+        gate = self.reader.slice(li, "gate", N, self.rank, p2l)
-+        up = self.reader.slice(li, "up", N, self.rank, p2l)
++        gate = self.reader.slice(li, "gate", N, self.slice_rank, p2l)
++        up = self.reader.slice(li, "up", N, self.slice_rank, p2l)
 +        layer.w13_qweight.data[:, :N].copy_(gate, non_blocking=False)
 +        layer.w13_qweight.data[:, N:].copy_(up, non_blocking=False)
-+        down = self.reader.slice(li, "down", N, self.rank, p2l)
++        down = self.reader.slice(li, "down", N, self.slice_rank, p2l)
 +        if self.types[2] == GGML_Q2_0 and self.type2 == GGML_Q8_0:
 +            down = q2_0_to_q8_0(down)
 +        assert tuple(down.shape) == tuple(layer.w2_qweight.shape), (down.shape, layer.w2_qweight.shape)
@@ -1065,6 +1071,9 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_hot.py b/python/sglang/srt/laye
 +        T, top_k = topk_ids.shape
 +        # KV-lent slots: the weights through the per-slot pointer tables
 +        p13 = getattr(layer, "kt_kv_ptr13", None)
++        if self.ep and self.rank != 0 and p13 is None and not layer.__dict__.get("kt_hot_slots", False):
++            # the resident experts are whole on every rank: rank 0 adds them (the slots come in a shadow layer)
++            return StandardCombineInput(hidden_states=torch.zeros_like(x))
 +        tbl = p13 is not None
 +        W13 = p13 if tbl else layer.w13_qweight
 +        W2 = layer.kt_kv_ptr2 if tbl else layer.w2_qweight
@@ -26605,7 +26614,50 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
  # KT_KV_HOT_DYNAMIC_RESIDENT=1 (with the dynamic slots): the N resident experts swap too.
  # kt-kernel then loads every expert (no GPU mask), so an expert that leaves a resident row
  # runs on the CPU; route sends the CPU -1 for every route the GPU takes. In a prefill
-@@ -307,7 +314,8 @@
+@@ -115,7 +122,7 @@
+ if triton is not None:
+ 
+     @triton.jit
+-    def _route_kernel(ids_ptr, w_ptr, tbl_ptr, rtbl_ptr, cnt_ptr, cid_ptr, cw_ptr, sid_ptr, sw_ptr, row_ptr, n,
++    def _route_kernel(ids_ptr, w_ptr, tbl_ptr, utbl_ptr, rtbl_ptr, cnt_ptr, cid_ptr, cw_ptr, sid_ptr, sw_ptr, row_ptr, n,
+                       HAS_RES: tl.constexpr, MASK_ZERO: tl.constexpr, CPU_SKIP: tl.constexpr,
+                       BLOCK: tl.constexpr):
+         """One layer's routes in one launch: count each routed expert, look it up in the
+@@ -129,6 +136,7 @@
+         ec = tl.where(valid, e, 0)
+         tl.atomic_add(cnt_ptr + ec, tl.where(valid, 1.0, 0.0), mask=valid)
+         s = tl.load(tbl_ptr + ec, mask=valid, other=-1)
++        u = tl.load(utbl_ptr + ec, mask=valid, other=-1)  # any rank's slot (this rank's table on one rank)
+         if HAS_RES:
+             r = tl.load(rtbl_ptr + ec, mask=valid, other=-1)
+             res = valid & (r >= 0)
+@@ -137,7 +145,7 @@
+         else:
+             res = valid & (s < -1)  # never
+             lent = valid & (s >= 0)
+-        gpu = lent | res
++        gpu = res | (valid & (u >= 0))
+         tl.store(cid_ptr + offs, tl.where(gpu, CPU_SKIP, e).to(cid_ptr.dtype.element_ty), mask=m)
+         tl.store(cw_ptr + offs, tl.where(gpu, 0.0, w).to(cw_ptr.dtype.element_ty), mask=m)
+         if MASK_ZERO:
+@@ -160,7 +168,7 @@
+     if n:
+         tbl, cnt = STATE["tbl"][L.idx], STATE["cnt"][L.idx]
+         _route_kernel[(triton.cdiv(n, 128),)](
+-            ids, w, tbl, STATE["rtbl"][L.idx] if DYN_RES else tbl, cnt, cid, cw, sid, sw,
++            ids, w, tbl, STATE["utbl"][L.idx], STATE["rtbl"][L.idx] if DYN_RES else tbl, cnt, cid, cw, sid, sw,
+             rows if DYN_RES else cid, n, HAS_RES=DYN_RES, MASK_ZERO=_MASK_ZERO,
+             CPU_SKIP=-1 if DYN_RES else 0, BLOCK=128)
+     return cid, cw, sid, sw, rows
+@@ -221,6 +229,7 @@
+         # lends the KV pool's pages its own way (KT_HOT_KV_LEND)
+         raise RuntimeError("KT_KV_HOT_LEND=1 with KT_HOT_DYNAMIC=1: use KT_HOT_KV_LEND for the dynamic cache")
+     shadow = copy.copy(layer)
++    shadow.__dict__["kt_hot_slots"] = True  # the slots, not the resident experts (kt_gguf_hot.py under EP)
+     shadow.__dict__["_parameters"] = {}
+     shadow.__dict__["_buffers"] = {}
+     shadow.__dict__["_modules"] = {}
+@@ -307,7 +316,8 @@
      shadow, method, made = sh
      x = _banks()
      loads = wrapper.__dict__.pop("_kt_kv_hot_loads", 0)
@@ -26615,7 +26667,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          # a loader that never hands these experts to the layer's weight loader
          # (one that skips the CPU experts' tensors) leaves the shadow empty: its
          # slots would compute nothing for the routes they take
-@@ -343,7 +351,11 @@
+@@ -343,7 +353,11 @@
      if kt_fill_global_expert_params is not None:
          kt_fill_global_expert_params(shadow, src=layer)
      with torch.cuda.device(dev):
@@ -26628,7 +26680,25 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
              method.process_weights_after_loading(shadow)
      L = _Layer(wrapper, len(LAYERS))
      found = _per_expert(shadow, x)
-@@ -401,7 +413,7 @@
+@@ -384,12 +398,17 @@
+         _log(f"layer {L.idx}: the shadow keeps {left / 2**20:.1f} MiB on the GPU "
+              f"outside its slots: {held}")
+     L.shadow, L.method = shadow, method
++    if _ep(L):
++        # this rank's experts only (e % world == rank), in order, to start with
++        own = [e for e in range(L.n, L.e) if e % method.world == method.rank]
++        L.held = (own + [-1] * L.x)[: L.x]
+     LAYERS.append(L)
+     # the lent counts, made before any graph is captured (route reads them)
+     STATE["k"] = torch.zeros(len(LAYERS), dtype=torch.int64, device=dev)
+     if DYNAMIC:
+         # the slot table and the route counts, also made before any capture
+         STATE["tbl"] = torch.full((len(LAYERS), L.e), -1, dtype=torch.int64, device=dev)
++        STATE["utbl"] = torch.full((len(LAYERS), L.e), -1, dtype=torch.int64, device=dev) if _ep(L) else STATE["tbl"]
+         STATE["cnt"] = torch.zeros((len(LAYERS), L.e), dtype=torch.float32, device=dev)
+     if DYN_RES:
+         # the resident rows by role (None: not the packed layout the arenas give, so they
+@@ -401,7 +420,7 @@
                  rows = None
                  break
              rows[key] = t
@@ -26637,10 +26707,54 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          rtbl = torch.full((len(LAYERS), L.e), -1, dtype=torch.int64, device=dev)
          if "rtbl" in STATE:
              rtbl[: STATE["rtbl"].shape[0]] = STATE["rtbl"]
-@@ -699,24 +711,218 @@
+@@ -459,6 +478,7 @@
+         ic = ids.long().clamp(min=0)
+         slot = STATE["tbl"][L.idx][ic].to(ids.dtype)
+         lent = (slot >= 0) & (ids >= 0)
++        any_lent = (STATE["utbl"][L.idx][ic] >= 0) & (ids >= 0)
+         if DYN_RES:
+             row = STATE["rtbl"][L.idx][ic].to(ids.dtype)
+             res = (row >= 0) & (ids >= 0)
+@@ -475,9 +495,10 @@
+             topk_ids=torch.where(gpu, torch.full_like(ids, -1), ids),
+             topk_weights=torch.where(gpu, torch.zeros_like(w), w)))
+     else:
++        any_lent = any_lent if DYNAMIC else lent
+         cpu = dispatch_output._replace(topk_output=topk._replace(
+-            topk_ids=torch.where(lent, torch.zeros_like(ids), ids),
+-            topk_weights=torch.where(lent, torch.zeros_like(w), w)))
++            topk_ids=torch.where(any_lent, torch.zeros_like(ids), ids),
++            topk_weights=torch.where(any_lent, torch.zeros_like(w), w)))
+     if _MASK_ZERO:
+         # a runner that cannot take -1 (Marlin): slot 0 at weight 0, which reads
+         # zeros when nothing is lent
+@@ -699,24 +720,244 @@
      return t.tolist()
  
  
++def _world() -> int:
++    from sglang.srt.distributed.parallel_state import get_tp_group
++
++    return get_tp_group().world_size
++
++
++def _ep(L) -> bool:
++    """The slots hold whole experts, this rank's share (kt_gguf_hot.py under KT_GGUF_HOT_EP)."""
++    return bool(getattr(L.method, "ep", False))
++
++
++def _union() -> None:
++    """Under EP: utbl from every rank's slot table (an all-reduce, the same forward on every rank), so rank 0's
++    CPU skips the routes any rank's slots take."""
++    if not DYNAMIC or not LAYERS or not _ep(LAYERS[0]):
++        return
++    from sglang.srt.distributed.parallel_state import get_tp_group
++
++    held = (STATE["tbl"] >= 0).to(torch.int32)
++    torch.distributed.all_reduce(held, op=torch.distributed.ReduceOp.MAX, group=get_tp_group().device_group)
++    STATE["utbl"].copy_(torch.where(held > 0, 0, -1))
++
++
 +def _is_gguf(L: _Layer) -> bool:
 +    """The slots' method is the GGUF hot method (kt_gguf_hot.py): raw GGUF rows, a reader for more."""
 +    return getattr(L.method, "reader", None) is not None and hasattr(L.method, "fill_experts")
@@ -26671,7 +26785,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
 +    cache when resident there, else read from the file through the method's reader."""
 +    global _GGUF_PEEK
 +    m = L.method
-+    li, N, rank = L.layer_idx, m.N, m.rank
++    li, N, rank = L.layer_idx, m.N, getattr(m, "slice_rank", m.rank)
 +    if _GGUF_PEEK is None:
 +        try:
 +            import kt_kernel.kt_kernel_ext as _ext
@@ -26738,7 +26852,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
 +        if not DYN_ASYNC or not swaps:
 +            return False
 +        for L, w, _, _, _ in swaps:
-+            if w != 0 or not _is_gguf(L) or getattr(L.method, "world", 1) != 1:
++            if w != 0 or not _is_gguf(L) or (getattr(L.method, "world", 1) != 1 and not _ep(L)):
 +                return False
 +        if cls.pool is None:
 +            from concurrent.futures import ThreadPoolExecutor
@@ -26774,7 +26888,8 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
 +            except ImportError:
 +                _GGUF_PEEK = (None, None)
 +        peek, unpin = _GGUF_PEEK
-+        ptrs = peek(L.layer_idx, e) if peek is not None else None
++        # under EP the cache holds TP slices (kt-kernel splits each expert over its NUMA pools): read the file
++        ptrs = peek(L.layer_idx, e) if peek is not None and not _ep(L) else None
 +        if ptrs is not None:
 +            import ctypes
 +
@@ -26785,10 +26900,11 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
 +            unpin(L.layer_idx, e)
 +            return
 +        m, N = L.method, L.method.N
++        rank = getattr(m, "slice_rank", m.rank)
 +        idx = torch.tensor([e], dtype=torch.int64)
-+        buf[:per].copy_(m.reader.slice(L.layer_idx, "gate", N, m.rank, idx)[0].reshape(-1))
-+        buf[per:2 * per].copy_(m.reader.slice(L.layer_idx, "up", N, m.rank, idx)[0].reshape(-1))
-+        buf[2 * per:].copy_(m.reader.slice(L.layer_idx, "down", N, m.rank, idx)[0].reshape(-1))
++        buf[:per].copy_(m.reader.slice(L.layer_idx, "gate", N, rank, idx)[0].reshape(-1))
++        buf[per:2 * per].copy_(m.reader.slice(L.layer_idx, "up", N, rank, idx)[0].reshape(-1))
++        buf[2 * per:].copy_(m.reader.slice(L.layer_idx, "down", N, rank, idx)[0].reshape(-1))
 +
 +    @classmethod
 +    def verify(cls, swaps) -> None:
@@ -26800,9 +26916,10 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
 +            w13, w2 = L.slots[r[("w13", False)]][i], L.slots[r[("w2", False)]][i]
 +            m, N = L.method, w13.shape[0] // 2
 +            idx = torch.tensor([e], dtype=torch.int64)
-+            want = (m.reader.slice(L.layer_idx, "gate", N, m.rank, idx)[0].reshape(-1),
-+                    m.reader.slice(L.layer_idx, "up", N, m.rank, idx)[0].reshape(-1),
-+                    m.reader.slice(L.layer_idx, "down", N, m.rank, idx)[0].reshape(-1))
++            rank = getattr(m, "slice_rank", m.rank)
++            want = (m.reader.slice(L.layer_idx, "gate", N, rank, idx)[0].reshape(-1),
++                    m.reader.slice(L.layer_idx, "up", N, rank, idx)[0].reshape(-1),
++                    m.reader.slice(L.layer_idx, "down", N, rank, idx)[0].reshape(-1))
 +            have = (w13[:N].reshape(-1).cpu(), w13[N:].reshape(-1).cpu(), w2.reshape(-1).cpu())
 +            diff = [int((a.view(torch.uint8) != b.view(torch.uint8)).sum()) for a, b in zip(have, want)]
 +            if any(diff):
@@ -26857,7 +26974,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      from sglang.srt.layers.moe import kt_stream_prefill
  
      st = kt_stream_prefill._instance
-@@ -781,7 +987,24 @@
+@@ -781,7 +1022,24 @@
      L = LAYERS[0]
      roles = _roles(L)
      st = getattr(kt_stream_prefill, "_instance", None)
@@ -26883,7 +27000,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          why = "no zero-copy arenas (KT_GPU_STREAM_ZEROCOPY=1 with KT_EXPERT_SHM=1)"
      elif roles is None:
          why = f"slot tensors {[(nm, str(L.slots[nm].dtype)) for _, nm in L.names]} are not packed MXFP4 bytes"
-@@ -824,6 +1047,10 @@
+@@ -824,6 +1082,10 @@
          L = LAYERS[0]
          if not DYN["on"]:
              ok, why = 0, "the dynamic slots are off"
@@ -26894,7 +27011,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          elif L.res_t is None:
              ok, why = 0, "the resident tensors are not the packed layout"
          else:
-@@ -842,7 +1069,9 @@
+@@ -842,7 +1104,9 @@
          DYN["res"] = bool(_over_ranks([ok], torch.distributed.ReduceOp.MIN)[0])
          _log("dynamic resident rows " + ("on: experts 0, 1 from the arenas match their rows" if DYN["res"]
                                            else f"off: {why or 'another rank could not'}; they hold 0..N-1"))
@@ -26905,7 +27022,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          for M in LAYERS:
              # the placement's experts, as many as there are banks
              M.x = M.b
-@@ -918,7 +1147,67 @@
+@@ -918,7 +1182,67 @@
          rtbl[L.idx, : L.n] = torch.arange(L.n, device=dev)
  
  
@@ -26973,7 +27090,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      """Every DYN_EVERY decode forwards, outside the graph: last round's copies enter
      the table, last round's counts become scores, and each layer swaps held experts
      for better-scored ones (out of the table now, copied in on the side stream)."""
-@@ -928,14 +1217,36 @@
+@@ -928,14 +1252,36 @@
      cur = torch.cuda.current_stream(dev)
      tbl = STATE["tbl"]
      rtbl = STATE.get("rtbl")
@@ -27014,7 +27131,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      if DYN["ev_cnt"] is not None:
          DYN["ev_cnt"].synchronize()
          seen = DYN["buf"].numpy().astype(np.float64)
-@@ -949,6 +1260,7 @@
+@@ -949,6 +1295,7 @@
      STATE["cnt"].zero_()
      DYN["ev_cnt"].record(cur)
      DYN["rounds"] += 1
@@ -27022,7 +27139,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      if DYN["ev_cnt"] is not None and DYN.get("last") is not None:
          # this round's routes against what the tables held through it
          seen, res = DYN["last"], bool(DYN.get("res"))
-@@ -956,7 +1268,8 @@
+@@ -956,7 +1303,8 @@
              on = [e for e in L.held[: L.k] if e >= 0] + (L.res_now if res else [])
              DYN["hit"] = DYN.get("hit", 0.0) + float(seen[L.idx, on].sum())
              DYN["all"] = DYN.get("all", 0.0) + float(seen[L.idx, 0 if res else L.n:].sum())
@@ -27032,7 +27149,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      swaps = []  # (layer, 0: slot / 1: resident row, its index, expert out, expert in)
      for L in LAYERS:
          k = L.k
-@@ -973,7 +1286,7 @@
+@@ -973,10 +1321,12 @@
  
          hs, changed, n = {has(p) for p in places}, set(), 0
          for e in np.argsort(-sc, kind="stable").tolist():
@@ -27041,7 +27158,12 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
                  break
              if (e < L.n and not res) or e in hs:
                  continue
-@@ -997,13 +1310,21 @@
++            if _ep(L) and e % L.method.world != L.method.rank:
++                continue  # another rank's expert
+             opts = [p for p in places if p not in changed]
+             if not opts:
+                 break
+@@ -997,13 +1347,21 @@
                  L.res_held[p[1]] = e
              changed.add(p)
              n += 1
@@ -27064,7 +27186,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          side = DYN["stream"]
          with torch.cuda.stream(side):
              side.wait_event(DYN["ev_unmap"])
-@@ -1015,7 +1336,7 @@
+@@ -1015,7 +1373,7 @@
                      L.res_now[i] = e
                  _arena_load(L, e, dst, DYN["order"])
              DYN["ev_copy"].record(side)
@@ -27073,16 +27195,40 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          DYN["swaps"] += len(swaps)
      if DYN["rounds"] % DYN_LOG == 0 and DYN["seen"] is not None:
          res = bool(DYN.get("res"))
-@@ -1026,6 +1347,7 @@
+@@ -1026,6 +1384,8 @@
               f"({(DYN['swaps'] - DYN['swaps_logged']) / (DYN_LOG * DYN_EVERY * max(len(LAYERS), 1)):.3f} "
               f"a forward and layer)")
          DYN["seen"], DYN["swaps_logged"] = None, DYN["swaps"]
++    _union()
 +    _ck("unmap, submit, log")
  
  
  def _hook() -> None:
-@@ -1082,6 +1404,8 @@
-     ks = _over_ranks(ks)
+@@ -1065,6 +1425,11 @@
+         spare_now = torch.cuda.mem_get_info(dev)[0] - (SPARE_FLOOR_MB << 20)
+         min_bytes = max(1, min_bytes - max(0, spare_now))
+     got = m.decode_lend(runner, RESERVE, min_bytes)
++    if _world() > 1 and not _over_ranks([1 if got > 0 else 0])[0]:
++        # a rank with nothing to lend (cards that differ): none lends, so every rank takes the same steps
++        if got > 0:
++            m.hot_release("another rank had nothing to lend")
++        return
+     if got <= 0:
+         return
+     budget = got - (MARGIN_MB << 20)
+@@ -1076,12 +1441,17 @@
+         if free > budget:
+             spare, budget = free - budget, free
+     ks = _plan(budget)
++    ep = _ep(LAYERS[0])
+     # rank 0's routing decides what the CPU skips, so every rank's slots must take
+     # the same routes: the slot counts are the smallest over the ranks (the spare
+-    # memory differs between the cards; the free pages do not)
+-    ks = _over_ranks(ks)
++    # memory differs between the cards; the free pages do not). Under EP each rank's
++    # slots hold its own experts and the CPU skips the union: each rank keeps its own count
++    if not ep:
++        ks = _over_ranks(ks)
      if DYNAMIC and DYN["on"] is None:
          _dyn_setup(dev)
 +        # the setup may have cut the slots to the banks
@@ -27090,9 +27236,29 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      for i, (L, k) in enumerate(zip(LAYERS, ks)):
          if k and any(kt_kv_vmm.restore(L.slots[nm], 0, _span(L, nm, k)) < 0 for _, nm in L.names):
              # no memory after all: this layer and the rest get nothing
-@@ -1138,6 +1462,12 @@
+@@ -1093,7 +1463,7 @@
+             ks = ks[:i] + [0] * (len(LAYERS) - i)
+             break
+     # a rank that could not map them all: the others give back what it lacks
+-    agreed = _over_ranks(ks)
++    agreed = ks if ep else _over_ranks(ks)
+     for L, k, a in zip(LAYERS, ks, agreed):
+         if a < k:
+             for _, nm in L.names:
+@@ -1108,6 +1478,7 @@
+         L.k = k
+     if DYNAMIC:
+         _dyn_table(dev)
++        _union()
+     kd = _k_dev(dev)
+     kd.copy_(torch.tensor(ks, dtype=torch.int64), non_blocking=True)
+     torch.cuda.synchronize(dev)
+@@ -1137,7 +1508,15 @@
+         # the slots leave the table; a round's copies in flight finish in the sync,
          # and what they were for is in each layer's held list for the next lend
          STATE["tbl"].fill_(-1)
++        if STATE["utbl"] is not STATE["tbl"]:
++            STATE["utbl"].fill_(-1)
          DYN["pending"] = None
 +        # a batch still loading is for slots about to go; its rows land in the
 +        # staging pool only, and the next lend fills the slots from each layer's held list
@@ -27613,7 +27779,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill.py b/python/sglang/sr
 diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf.py b/python/sglang/srt/layers/moe/kt_stream_prefill_gguf.py
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_stream_prefill_gguf.py
-@@ -0,0 +1,551 @@
+@@ -0,0 +1,560 @@
 +"""GPU-streamed prefill for KT CPU experts, GGUF edition (--kt-method LLAMAFILE).
 +
 +Above KT_GPU_STREAM_PREFILL tokens a MoE layer's CPU experts are not computed
@@ -27812,7 +27978,13 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf.py b/python/sgla
 +        self.G = GROUP_SIZE
 +        self.top_k = layer.top_k
 +        self.path = method.kt_config.weight_path
-+        geo = _geometry_for(self.path, self.N, self.K, self.world)
++        # KT_GGUF_STREAM_EP (on with more than one rank): every rank streams whole experts, a contiguous share of
++        # them, instead of a slice of every expert. A GGUF block of 256 values cannot be cut, and V4.1's
++        # intermediate 2304 split in two is 1152; the MoE output's all-reduce adds the shares as it adds slices.
++        self.ep = self.world > 1 and os.environ.get("KT_GGUF_STREAM_EP", "1") == "1"
++        if self.ep:
++            self.N = self.N * self.world
++        geo = _geometry_for(self.path, self.N, self.K, 1 if self.ep else self.world)
 +        self.loader = geo.loader
 +        self.E = geo.E
 +        self._kt_layers = geo.layers
@@ -28096,7 +28268,10 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf.py b/python/sgla
 +            _log(f"rank{self.rank} cutlass workspace {nbytes/1e6:.0f} MB for {T_ws} tokens x {self.G} experts")
 +        topk_weights = dispatch_output.topk_output.topk_weights
 +        first = 0 if getattr(method.gpu_method, "streams_hot_experts", False) else method.num_gpu_experts
-+        groups = [(b, min(self.G, self.E - b)) for b in range(first, self.E, self.G)]
++        if hasattr(self, "_groups"):
++            groups = self._groups(method)  # the NVMe edition: under KT_GGUF_STREAM_EP, this rank's share
++        else:
++            groups = [(b, min(self.G, self.E - b)) for b in range(first, self.E, self.G)]
 +        stats = {"dma_enq": 0.0, "graph_enq": 0.0}
 +        t0 = time.perf_counter()
 +        self._bank(layer_idx)
@@ -28168,7 +28343,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf.py b/python/sgla
 diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py
-@@ -0,0 +1,737 @@
+@@ -0,0 +1,757 @@
 +"""GPU-streamed prefill for GGUF CPU experts fed from the GGUF files (NVMe), for hosts whose RAM cannot hold
 +the experts (the 64 GB V4.1-1017 setup: 119 GB of IQ1_M / IQ2_XXS experts, 40 GiB of them in kt-kernel's own
 +RAM cache).
@@ -28232,6 +28407,18 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +MMQ_ON = os.environ.get("KT_GGUF_STREAM_MMQ", "0") == "1"
 +RING = int(os.environ.get("KT_GGUF_STREAM_RING", "6"))
 +ALIGN = 4096
++
++
++def _ep_weights(world: int) -> List[float]:
++    """Each rank's share of the streamed experts: KT_GGUF_STREAM_EP_WEIGHTS ("3,2"), else its GPU's SM count
++    (rank r on CUDA device r). Cards that differ in architecture as well may want the variable."""
++    spec = os.environ.get("KT_GGUF_STREAM_EP_WEIGHTS", "")
++    if spec:
++        w = [float(x) for x in spec.split(",")]
++        if len(w) == world and all(x > 0 for x in w):
++            return w
++        _log(f"KT_GGUF_STREAM_EP_WEIGHTS={spec!r} is not {world} positive numbers: by SM count")
++    return [float(torch.cuda.get_device_properties(r).multi_processor_count) for r in range(world)]
 +
 +
 +def _pin_io_thread() -> None:
@@ -28559,7 +28746,15 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_stream_prefill_gguf_nvme.py b/python
 +
 +    def _groups(self, method) -> List[Tuple[int, int]]:
 +        first = 0 if getattr(method.gpu_method, "streams_hot_experts", False) else method.num_gpu_experts
-+        return [(b, min(self.G, self.E - b)) for b in range(first, self.E, self.G)]
++        lo, hi = first, self.E
++        if self.ep:
++            # this rank's contiguous share of the experts, in whole groups, in proportion to its GPU's weight
++            n_groups = -(-(self.E - first) // self.G)
++            w = _ep_weights(self.world)
++            cut = [round(n_groups * sum(w[:r]) / sum(w)) for r in range(self.world + 1)]
++            lo = first + cut[self.rank] * self.G
++            hi = min(self.E, first + cut[self.rank + 1] * self.G)
++        return [(b, min(self.G, hi - b)) for b in range(lo, hi, self.G)]
 +
 +    def _plan_layer(self, layer_idx: int, groups, front: bool = False) -> None:
 +        """Queue the layer's groups not already queued or ready; front: before everything else planned."""

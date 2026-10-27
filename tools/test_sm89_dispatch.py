@@ -265,10 +265,13 @@ class WrapperTest(unittest.TestCase):
 class LauncherDefaultsTest(unittest.TestCase):
     def test_ada_defaults_preserve_native_devices_and_user_overrides(self):
         launcher = pathlib.Path(__file__).resolve().parents[1] / "serve.sh"
-        # the GGUF recipe's block also covers Turing (SM75)
-        blocks = re.findall(r'if \[\[ "\$cap" == "8\.9"(?: \|\| "\$cap" == "7\.5")? \]\]; then\n.*?\nfi',
-                            launcher.read_text(encoding="utf-8"), re.DOTALL)
+        text = launcher.read_text(encoding="utf-8")
+        # the GGUF recipe's block also covers Turing (SM75), and reads every GPU's capability (any_cap)
+        blocks = re.findall(r'if (?:\[\[ "\$cap" == "8\.9"(?: \|\| "\$cap" == "7\.5")? \]\]|'
+                            r'any_cap 8\.9 \|\| any_cap 7\.5); then\n.*?\nfi', text, re.DOTALL)
         self.assertEqual(len(blocks), 1)
+        helper = re.findall(r'^any_cap\(\) \{.*\}$', text, re.MULTILINE)
+        blocks[0] = 'caps=("$cap")\n' + "\n".join(helper) + "\n" + blocks[0]
         names = ["SGLANG_OPT_USE_TOPK_V2", "SGLANG_OPT_USE_TILELANG_MHC_PRE",
                  "SGLANG_OPT_DEEPGEMM_HC_PRENORM", "SGLANG_FP8_PAGED_MQA_LOGITS_TORCH",
                  "SGLANG_DSV41_HOST_KV"]

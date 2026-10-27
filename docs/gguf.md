@@ -137,9 +137,48 @@ the GGUF instead of kept in host memory (`KT_PREFILL_LEND_MIRROR=gguf`, on).
 
 V100 (SM70) is not covered: CUDA 13 dropped it, so it would take a CUDA 12 build of the whole stack.
 
+## Two or more GPUs
+
+`serve.sh` uses every visible GPU, one tensor-parallel rank each (`KT_GGUF_TP=<n>` uses fewer).
+Each GPU's CPU work runs on the NUMA node it hangs off, one kt-kernel pool a node.
+
+A GGUF block holds 256 values and cannot be cut.
+V4.1's expert intermediate is 2304; split in two it is 1152, not a whole number of blocks.
+So the GPUs share the experts, not the rows of each expert:
+
+- **CPU experts.** kt-kernel splits each expert's rows between the nodes by whole blocks
+  (1280 and 1024), as it already did.
+- **Shared expert.** It is kept whole on every GPU (`SGLANG_SHARED_EXPERT_TP1=1`).
+  That costs 0.49 GB a GPU.
+- **Hot experts.** Each GPU's slots hold whole experts, only those with `e % world == rank`
+  (`KT_GGUF_HOT_EP=1`, on with more than one rank).
+  A route goes to the GPU whose slot holds its expert.
+  Rank 0's CPU skips what any GPU's slot holds: the GPUs' slot tables are joined with an
+  all-reduce whenever one changes.
+  The resident expert is whole on every GPU and computed by rank 0 only.
+- **Prefill.** Each GPU streams whole experts for its own share of the layer
+  (`KT_GGUF_STREAM_EP=1`, on with more than one rank).
+  The MoE output's all-reduce adds the shares.
+- **Prefill reads.** The expert cache holds each node's row slice, not whole experts.
+  So the prefill reads whole experts through the page cache (`KT_GGUF_STREAM_DIRECT=0`) when
+  the nodes have room for the file on top of the cache.
+  With less memory it reads them with `O_DIRECT`.
+
+GPUs that differ are handled like this:
+
+- Settings every rank shares follow the weakest card: the lowest compute capability, the
+  smallest memory.
+- Each GPU keeps its own number of hot slots.
+- The hot lend runs only when every GPU has something to lend.
+- The prefill's share of the experts follows each GPU's SM count.
+  `KT_GGUF_STREAM_EP_WEIGHTS=3,2` sets it by hand.
+- SGLang's check that the GPUs have the same memory is turned off when they do not.
+
+Two GPUs that differ in memory were run: GPU 1 with 4 GiB taken by another process.
+GPUs of two architectures (an RTX 50 with an RTX 20, say) should work but were not run.
+
 ## Not carried over from the MXFP4 recipe
 
-- Tensor parallelism: the GGUF blocks of an expert do not split across ranks.
 - The placement file and the static hot experts: the dynamic slots find the hot experts themselves.
 - `wo_a` in FP8: it is a GGUF tensor here.
 - The vision tower: the GGUF has none.
