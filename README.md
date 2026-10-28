@@ -33,6 +33,16 @@ GGUF=/models/dsv41-gsq-iq2xxs ./setup.sh
 GGUF=/models/dsv41-gsq-iq2xxs ./serve.sh
 ```
 
+Or all of it in one command:
+
+```
+./run.sh
+```
+
+`run.sh` runs `setup.sh`, downloads the IQ2_XXS build and the Engram file into `./models/` when they are not there, and starts `serve.sh`.
+`BUILD=IQ1_M` or `BUILD=IQ2_XS` picks another build, and `GGUF=<dir>` uses one already downloaded.
+It remembers the directory in `state/run.env`, so the next `./run.sh` only starts the server.
+
 The revision is the pack in llama.cpp's own layout (2026-10-27: six shards a build, the Engram tables as one tensor).
 Downloads in the earlier layout (four shards a build) work too.
 The shard-6 link the pack's README asks for is not needed here, and does no harm.
