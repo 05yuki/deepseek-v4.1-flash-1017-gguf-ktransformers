@@ -29350,7 +29350,7 @@ diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/la
 diff -ruN a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
 --- a/python/sglang/srt/model_executor/model_runner.py
 +++ b/python/sglang/srt/model_executor/model_runner.py
-@@ -1867,6 +1867,9 @@
+@@ -1896,6 +1896,9 @@
              from sglang.srt.layers.moe import kt_lend
  
              kt_lend.before_forward(forward_batch)
