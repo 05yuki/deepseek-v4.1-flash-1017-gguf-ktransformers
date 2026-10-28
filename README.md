@@ -22,7 +22,7 @@ This is the GGUF counterpart of
 [deepseek-v4.1-flash-1017-ktransformers](https://github.com/05yuki/deepseek-v4.1-flash-1017-ktransformers),
 which runs the MXFP4 checkpoint on 512 GB of RAM.
 It carries the same SGLang and KTransformers changes, plus the GGUF ones in `patches/gguf/`.
-It is pinned to SGLang main `65505981` and KTransformers `95009ea` (torch 2.14.1 with CUDA 13
+It is pinned to SGLang main `5d8e90a0` and KTransformers `95009ea` (torch 2.14.1 with CUDA 13
 wheels, FlashInfer 0.7.2, CUDA toolkit 13.1); later upstream versions are not tracked.
 
 ```
@@ -87,7 +87,7 @@ The server speaks SGLang's OpenAI-compatible API on `127.0.0.1:8080`, one reques
 
 ## What setup.sh does
 
-1. Clones sgl-project/sglang at `65505981` and applies the MXFP4 recipe's patches (tiers 0 to
+1. Clones sgl-project/sglang at `5d8e90a0` and applies the MXFP4 recipe's patches (tiers 0 to
    2, [docs/patches.md](docs/patches.md), [docs/tier1.md](docs/tier1.md)), then
    `patches/gguf/sglang-gguf.patch` ([docs/gguf.md](docs/gguf.md)).
 2. Clones kvcache-ai/ktransformers at `95009ea` and applies `patches/kt-kernel-tree.patch`,

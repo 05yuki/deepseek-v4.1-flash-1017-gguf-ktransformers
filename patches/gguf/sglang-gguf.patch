@@ -177,7 +177,7 @@ diff -ruN a/python/sglang/kernels/ops/gemm/bf16_fp32.py b/python/sglang/kernels/
 diff -ruN a/python/sglang/srt/layers/attention/deepseek_v4_backend.py b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
 --- a/python/sglang/srt/layers/attention/deepseek_v4_backend.py
 +++ b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
-@@ -210,7 +210,8 @@
+@@ -212,7 +212,8 @@
  def _use_sm89_sparse_attention() -> bool:
      # Ada has BF16 tensor cores, but cannot run FlashMLA's SM90+ kernels.
      # Match the runtime platform exactly; native SM90/SM100/SM120 paths stay intact.
@@ -330,7 +330,7 @@ diff -ruN a/python/sglang/srt/layers/kt_sm75_ops.py b/python/sglang/srt/layers/k
 diff -ruN a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
 --- a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
 +++ b/python/sglang/srt/layers/moe/fused_moe_triton/layer.py
-@@ -488,7 +488,19 @@
+@@ -524,7 +524,19 @@
          server_args = get_server_args()
          kt_config = create_kt_config_from_server_args(server_args, layer_id)
          if kt_config is not None:
@@ -8894,7 +8894,7 @@ diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/la
 diff -ruN a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
 --- a/python/sglang/srt/model_executor/model_runner.py
 +++ b/python/sglang/srt/model_executor/model_runner.py
-@@ -1896,6 +1896,9 @@
+@@ -1895,6 +1895,9 @@
              from sglang.srt.layers.moe import kt_lend
  
              kt_lend.before_forward(forward_batch)
