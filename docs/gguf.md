@@ -15,6 +15,16 @@ The MMQ extension the GGUF patches use (`kt_gguf_moe_mmq`, llama.cpp's kernels) 
 
 ## Weights
 
+The pack comes in two layouts, and both load.
+
+- **Earlier** (before 2026-10-27): four shards a build; each Engram layer its own table (`blk.N.engram_embd`); the Engram gate as two BF16 tensors, `engram_q` and `engram_k`.
+- **llama.cpp's** (2026-10-27 and later): five shards a build plus the Engram file as shard 6; the Engram layers' rows one after another in `per_layer_token_embd`, their sizes in the first shard's metadata (`deepseek41.ple.*`); the gate folded into one F32 tensor, `engram_gate` = q × k.
+- The quantized weights are the same bytes in both.
+- `tools/make-engram-manifest-gguf.py` finds each Engram layer's rows in either.
+- The F32 gate is split back at load into a bf16 pair whose product is exactly the gate (`_split_gate` in `kt_gguf_dense_v41.py`). The gate is a product of two bf16 values, so its significand is a product of two integers below 256, and any such pair of factors serves.
+- So the Engram module and its fused gate kernel run unchanged on either layout. Reading the F32 gate as one weight instead was 0.29 µs a call slower (2.19 against 1.89 µs at one token).
+- With the hot slots held fixed, the two layouts give the same NLL on all 11,496 tokens.
+
 - **Dense layers** (`kt_gguf_dense_v41.py`, `quantization/gguf.py`, the loader): every dense tensor is
   read from the GGUF shards and kept in its GGUF type on the GPU (Q5_K and others in this pack). The
   compressor and the indexer are dequantized to bf16 at load (`modules_to_not_convert`). Decode

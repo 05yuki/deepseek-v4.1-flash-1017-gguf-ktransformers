@@ -452,12 +452,15 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/la
 diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_dense_v41.py b/python/sglang/srt/layers/moe/kt_gguf_dense_v41.py
 --- /dev/null
 +++ b/python/sglang/srt/layers/moe/kt_gguf_dense_v41.py
-@@ -0,0 +1,155 @@
+@@ -0,0 +1,188 @@
 +"""Dense (non-expert) weights of a DeepSeek-V4.1 GGUF (llama.cpp arch "deepseek41") as the checkpoint's own
 +tensor names, so DeepseekV4ForCausalLM.load_weights loads a GGUF the way it loads the safetensors checkpoint.
 +
 +The converter changed no values (every F32 / BF16 tensor is bit-identical to the
-+checkpoint) and one shape: wo_a comes as [8, 1024, 4096] for [8192, 4096]. Quantized tensors (Q5_K, Q8_0, ...)
++checkpoint) and one shape: wo_a comes as [8, 1024, 4096] for [8192, 4096]. The pack's llama.cpp layout (2026-10-27
++and later) names engram_wkv engram_kv, keeps wo_a 2D, and folds engram_q and engram_k into the F32 engram_gate
++(q * k, exact), which is split back into a bf16 pair with exactly that product (_split_gate) and loaded as
++engram.q_weight / engram.k_weight; its vision router bias (exp_probs_b_vl) is skipped. Quantized tensors (Q5_K, Q8_0, ...)
 +are dequantized to bf16 with gguf-py; F32 / BF16 are viewed. Not yielded: the routed experts
 +(blk.N.ffn_*_exps, kt-kernel reads them from the same GGUF) and the engram tables (the engram adapter reads its
 +rows itself). KT_GGUF_DENSE_THREADS=<n> dequantizes the big tensors in row blocks on n threads.
@@ -510,9 +513,12 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_dense_v41.py b/python/sglang/sr
 +    "engram_q": "engram.q_weight",
 +    "engram_k": "engram.k_weight",
 +    "engram_wkv": "engram.wkv.weight",
++    # the llama.cpp layout
++    "engram_kv": "engram.wkv.weight",
++    "engram_gate": "engram.gate",  # split into q_weight and k_weight (_split_gate)
 +}
 +_GLOBAL = {"token_embd": "embed.weight", "output": "head.weight", "output_norm": "norm.weight"}
-+_SKIP = ("_exps", "engram_embd")
++_SKIP = ("_exps", "engram_embd", "exp_probs_b_vl")
 +
 +
 +def checkpoint_name(gguf_name: str):
@@ -577,6 +583,28 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_dense_v41.py b/python/sglang/sr
 +    return quantized
 +
 +
++def _split_gate(g: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
++    """bf16 q, k with q * k == g exactly in fp32. g is a product of two bf16 values, so |g| = n * 2^E with n a product
++    of two integers below 256; any such pair of factors serves (the Engram gate multiplies q and k in fp32 first)."""
++    g = g.float().contiguous()
++    nz = g != 0
++    a = g.abs().masked_fill(~nz, 1.0)
++    _, e = torch.frexp(a)
++    n = torch.ldexp(a, 16 - e).round().long()  # 16-bit integer significand, exact: g has at most 16 significant bits
++    E = e - 16
++    tz = (n & -n).float().log2().long()  # strip the powers of two into the exponent
++    n, E = n >> tz, E + tz
++    d = torch.arange(1, 256, dtype=torch.long)
++    ok = (n.reshape(-1, 1) % d == 0) & (n.reshape(-1, 1) // d <= 255)
++    assert bool(ok.any(dim=1).all()), "engram_gate is not a product of two bf16 values"
++    qa = d[ok.float().argmax(dim=1)].reshape(n.shape)
++    kb = n // qa
++    q = (torch.ldexp(qa.float(), E) * torch.sign(g)).masked_fill(~nz, 0.0).to(torch.bfloat16)
++    k = kb.float().masked_fill(~nz, 1.0).to(torch.bfloat16)
++    assert torch.equal(q.float() * k.float(), g), "engram_gate split is not exact"
++    return q, k
++
++
 +def gguf_v41_dense_weights(gguf_dir: str, model=None) -> Iterator[Tuple[str, torch.Tensor]]:
 +    shards = sorted(glob.glob(os.path.join(gguf_dir, "*-000??-of-000??.gguf")))
 +    if not shards:
@@ -600,6 +628,11 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_gguf_dense_v41.py b/python/sglang/sr
 +                yield base + ".qweight", raw
 +                continue
 +            w = _to_torch(t)
++            if name.endswith(".engram.gate"):
++                q, k = _split_gate(w)
++                yield name[: -len("gate")] + "q_weight", q
++                yield name[: -len("gate")] + "k_weight", k
++                continue
 +            if name.endswith("attn.wo_a.weight") and w.dim() == 3:
 +                w = w.reshape(-1, w.shape[-1])  # [8, 1024, 4096] -> [8192, 4096]
 +            yield name, w
