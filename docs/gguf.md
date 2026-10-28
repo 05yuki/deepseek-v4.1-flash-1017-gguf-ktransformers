@@ -10,6 +10,9 @@
 
 A switch marked "on" is on in `serve.sh`.
 
+The MMQ extension the GGUF patches use (`kt_gguf_moe_mmq`, llama.cpp's kernels) comes with tier 1's
+[`stream-mmq`](tier1.md#18-stream-mmq), which the MXFP4 recipe's streamed prefill also uses.
+
 ## Weights
 
 - **Dense layers** (`kt_gguf_dense_v41.py`, `quantization/gguf.py`, the loader): every dense tensor is
