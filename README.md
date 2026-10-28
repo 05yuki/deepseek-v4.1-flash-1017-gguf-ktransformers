@@ -27,10 +27,15 @@ wheels, FlashInfer 0.7.2, CUDA toolkit 13.1); later upstream versions are not tr
 
 ```
 hf download ISTA-DASLab/DeepSeek-V4.1-Flash-1017-GSQ-RCO-GGUF \
+  --revision 653a9874aa38c356233c5f3cc8c96b19a43b57eb \
   --include "*IQ2_XXS*" "*Engram*" --local-dir /models/dsv41-gsq-iq2xxs
 GGUF=/models/dsv41-gsq-iq2xxs ./setup.sh
 GGUF=/models/dsv41-gsq-iq2xxs ./serve.sh
 ```
+
+The `--revision` matters.
+On 2026-10-27 the pack's main branch moved to llama.cpp's own layout (six shards a build, the Engram tables as one tensor).
+This recipe reads the layout before it, and `setup.sh` stops on the new one.
 
 `GGUF=<dir> tools/check.sh` starts the server once, sends one short request, checks that an
 answer comes back, and stops the server.

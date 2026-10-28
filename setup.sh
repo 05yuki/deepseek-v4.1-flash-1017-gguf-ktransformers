@@ -25,6 +25,13 @@
 set -Eeuo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
+# the pack's main branch moved to llama.cpp's own deepseek41 layout on 2026-10-27 (six shards per build, the
+# Engram tables as one tensor); this recipe reads the layout before it (four shards per build)
+if [[ -n "${GGUF:-}" ]] && compgen -G "$GGUF/*-of-00006.gguf" >/dev/null && ! compgen -G "$GGUF/*-of-00004.gguf" >/dev/null; then
+  echo "$GGUF holds the pack's llama.cpp layout (six shards, 2026-10-27 and later); this recipe reads the earlier" >&2
+  echo "layout: download it with --revision 653a9874aa38c356233c5f3cc8c96b19a43b57eb (README)" >&2
+  exit 3
+fi
 SGLANG_COMMIT=655059819cda56f4c0feb5e3f09056caa6907bc7
 KT_COMMIT=95009ea6856c0799e517e93cb12be5e8494bc7ce
 # the GGUF patch sits on the whole of the MXFP4 recipe's SGLang changes (tiers 0 to 2, every tier-1 feature)
