@@ -6286,7 +6286,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      if _MASK_ZERO:
          # a runner that cannot take -1 (Marlin): slot 0 at weight 0, which reads
          # zeros when nothing is lent
-@@ -699,24 +720,244 @@
+@@ -699,27 +720,229 @@
      return t.tolist()
  
  
@@ -6335,6 +6335,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      return r if len(r) == 4 else None
  
  
+-def _to_dev(rows, dev) -> torch.Tensor:
 +_GGUF_PEEK = None
 +
 +
@@ -6507,23 +6508,19 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
 +
 +
 +def _to_dev(rows, dev):
-+    """A small int64 table update through pinned memory: no wait for the stream (a pageable copy waits)."""
-+    return torch.tensor(rows, dtype=torch.int64).pin_memory().to(dev, non_blocking=True)
-+
-+
-+def _pending(swaps, dev):
+     """A small int64 table update through pinned memory: no wait for the stream (a pageable copy waits)."""
+     return torch.tensor(rows, dtype=torch.int64).pin_memory().to(dev, non_blocking=True)
+ 
+ 
+ def _pending(swaps, dev):
+-    """The table entries a round's swaps make, split by table on the host: applying them needs no boolean
+-    mask of a device tensor, whose element count waits for the stream."""
 +    """The table entries a batch of swaps makes, split by table on the host: applying them needs no boolean mask,
 +    whose element count waited for the side stream's copies (10-26: most of a round's host time)."""
-+    out = []
-+    for which in (0, 1):
-+        rows = [(L.idx, e, i) for L, w, i, _, e in swaps if w == which]
-+        if rows:
-+            out.append((which, _to_dev(rows, dev)))
-+    return out
-+
-+
- def _arena_load(L: _Layer, e: int, dst, order: int) -> None:
-     """Physical expert e of the layer from this rank's part of kt-kernel's arenas
+     out = []
+     for which in (0, 1):
+         rows = [(L.idx, e, i) for L, w, i, _, e in swaps if w == which]
+@@ -733,6 +956,8 @@
      (gate, up, down packed e2m1; their fp32 group scales) into dst, the slot
      layout: w13 [2N, K/2] with gate rows first (order 0) or up rows first (1), w2
      [K, N/2], e8m0 scale bytes. On the current stream."""
@@ -6532,7 +6529,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      from sglang.srt.layers.moe import kt_stream_prefill
  
      st = kt_stream_prefill._instance
-@@ -781,7 +1022,24 @@
+@@ -797,7 +1022,24 @@
      L = LAYERS[0]
      roles = _roles(L)
      st = getattr(kt_stream_prefill, "_instance", None)
@@ -6558,7 +6555,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          why = "no zero-copy arenas (KT_GPU_STREAM_ZEROCOPY=1 with KT_EXPERT_SHM=1)"
      elif roles is None:
          why = f"slot tensors {[(nm, str(L.slots[nm].dtype)) for _, nm in L.names]} are not packed MXFP4 bytes"
-@@ -824,6 +1082,10 @@
+@@ -840,6 +1082,10 @@
          L = LAYERS[0]
          if not DYN["on"]:
              ok, why = 0, "the dynamic slots are off"
@@ -6569,18 +6566,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          elif L.res_t is None:
              ok, why = 0, "the resident tensors are not the packed layout"
          else:
-@@ -842,7 +1104,9 @@
-         DYN["res"] = bool(_over_ranks([ok], torch.distributed.ReduceOp.MIN)[0])
-         _log("dynamic resident rows " + ("on: experts 0, 1 from the arenas match their rows" if DYN["res"]
-                                           else f"off: {why or 'another rank could not'}; they hold 0..N-1"))
--    else:
-+    # the slots shrink when the dynamic slots are off (this `else` was
-+    # the resident rows', which cut the slots under KT_KV_HOT_DYNAMIC_RESIDENT=0, 10-25)
-+    if not DYN["on"]:
-         for M in LAYERS:
-             # the placement's experts, as many as there are banks
-             M.x = M.b
-@@ -918,7 +1182,67 @@
+@@ -936,7 +1182,67 @@
          rtbl[L.idx, : L.n] = torch.arange(L.n, device=dev)
  
  
@@ -6648,24 +6634,20 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      """Every DYN_EVERY decode forwards, outside the graph: last round's copies enter
      the table, last round's counts become scores, and each layer swaps held experts
      for better-scored ones (out of the table now, copied in on the side stream)."""
-@@ -928,14 +1252,36 @@
+@@ -946,13 +1252,36 @@
      cur = torch.cuda.current_stream(dev)
      tbl = STATE["tbl"]
      rtbl = STATE.get("rtbl")
 +    _ck("start")
      if DYN["pending"] is not None:
          cur.wait_event(DYN["ev_copy"])
--        t = DYN["pending"]
--        for which, table in ((0, tbl), (1, rtbl)):
--            m = t[:, 3] == which
 +        if DYN_VERIFY and DYN.get("pending_swaps"):
 +            _AsyncGGUF.verify(DYN["pending_swaps"])
 +        DYN["pending_swaps"] = None
-+        for which, t in DYN["pending"]:  # split on the host
-+            table = tbl if which == 0 else rtbl
+         for which, t in DYN["pending"]:  # split on the host
+             table = tbl if which == 0 else rtbl
              if table is not None:  # (no resident rows' table without KT_KV_HOT_DYNAMIC_RESIDENT)
--                table[t[m, 0], t[m, 1]] = t[m, 2]
-+                table[t[:, 0], t[:, 1]] = t[:, 2]
+                 table[t[:, 0], t[:, 1]] = t[:, 2]
          DYN["pending"] = None
 +    # a batch whose rows are staged goes to its slots now; its table entries the
 +    # round after (pending, above)
@@ -6689,7 +6671,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      if DYN["ev_cnt"] is not None:
          DYN["ev_cnt"].synchronize()
          seen = DYN["buf"].numpy().astype(np.float64)
-@@ -949,6 +1295,7 @@
+@@ -966,6 +1295,7 @@
      STATE["cnt"].zero_()
      DYN["ev_cnt"].record(cur)
      DYN["rounds"] += 1
@@ -6697,7 +6679,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      if DYN["ev_cnt"] is not None and DYN.get("last") is not None:
          # this round's routes against what the tables held through it
          seen, res = DYN["last"], bool(DYN.get("res"))
-@@ -956,7 +1303,8 @@
+@@ -973,7 +1303,8 @@
              on = [e for e in L.held[: L.k] if e >= 0] + (L.res_now if res else [])
              DYN["hit"] = DYN.get("hit", 0.0) + float(seen[L.idx, on].sum())
              DYN["all"] = DYN.get("all", 0.0) + float(seen[L.idx, 0 if res else L.n:].sum())
@@ -6707,7 +6689,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      swaps = []  # (layer, 0: slot / 1: resident row, its index, expert out, expert in)
      for L in LAYERS:
          k = L.k
-@@ -973,10 +1321,12 @@
+@@ -990,10 +1321,12 @@
  
          hs, changed, n = {has(p) for p in places}, set(), 0
          for e in np.argsort(-sc, kind="stable").tolist():
@@ -6721,7 +6703,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
              opts = [p for p in places if p not in changed]
              if not opts:
                  break
-@@ -997,13 +1347,21 @@
+@@ -1014,6 +1347,7 @@
                  L.res_held[p[1]] = e
              changed.add(p)
              n += 1
@@ -6729,10 +6711,9 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      if swaps:
          for which, table in ((0, tbl), (1, rtbl)):
              out = [(L.idx, old) for L, w, _, old, _ in swaps if w == which and old >= 0]
-             if out and table is not None:
--                t = torch.tensor(out, dtype=torch.int64).to(dev)
-+                t = _to_dev(out, dev)
-                 table[t[:, 0], t[:, 1]] = -1
+@@ -1023,6 +1357,13 @@
+                 t = _to_dev([i * table.shape[1] + e for i, e in out], dev)
+                 table.view(-1).index_fill_(0, t, -1)
          DYN["ev_unmap"].record(cur)
 +    if swaps and _AsyncGGUF.ready(swaps):
 +        # the rows load in the background; a later round queues them. The last
@@ -6744,16 +6725,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
          side = DYN["stream"]
          with torch.cuda.stream(side):
              side.wait_event(DYN["ev_unmap"])
-@@ -1015,7 +1373,7 @@
-                     L.res_now[i] = e
-                 _arena_load(L, e, dst, DYN["order"])
-             DYN["ev_copy"].record(side)
--        DYN["pending"] = torch.tensor([(L.idx, e, i, w) for L, w, i, _, e in swaps], dtype=torch.int64).to(dev)
-+        DYN["pending"] = _pending(swaps, dev)
-         DYN["swaps"] += len(swaps)
-     if DYN["rounds"] % DYN_LOG == 0 and DYN["seen"] is not None:
-         res = bool(DYN.get("res"))
-@@ -1026,6 +1384,8 @@
+@@ -1045,6 +1386,8 @@
               f"({(DYN['swaps'] - DYN['swaps_logged']) / (DYN_LOG * DYN_EVERY * max(len(LAYERS), 1)):.3f} "
               f"a forward and layer)")
          DYN["seen"], DYN["swaps_logged"] = None, DYN["swaps"]
@@ -6762,7 +6734,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
  
  
  def _hook() -> None:
-@@ -1065,6 +1425,11 @@
+@@ -1084,6 +1427,11 @@
          spare_now = torch.cuda.mem_get_info(dev)[0] - (SPARE_FLOOR_MB << 20)
          min_bytes = max(1, min_bytes - max(0, spare_now))
      got = m.decode_lend(runner, RESERVE, min_bytes)
@@ -6774,7 +6746,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      if got <= 0:
          return
      budget = got - (MARGIN_MB << 20)
-@@ -1076,12 +1441,17 @@
+@@ -1095,10 +1443,13 @@
          if free > budget:
              spare, budget = free - budget, free
      ks = _plan(budget)
@@ -6789,12 +6761,8 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
 +        ks = _over_ranks(ks)
      if DYNAMIC and DYN["on"] is None:
          _dyn_setup(dev)
-+        # the setup may have cut the slots to the banks
-+        ks = [min(k, L.x) for L, k in zip(LAYERS, ks)]
-     for i, (L, k) in enumerate(zip(LAYERS, ks)):
-         if k and any(kt_kv_vmm.restore(L.slots[nm], 0, _span(L, nm, k)) < 0 for _, nm in L.names):
-             # no memory after all: this layer and the rest get nothing
-@@ -1093,7 +1463,7 @@
+         # the setup may have cut the slots to the banks
+@@ -1114,7 +1465,7 @@
              ks = ks[:i] + [0] * (len(LAYERS) - i)
              break
      # a rank that could not map them all: the others give back what it lacks
@@ -6803,7 +6771,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      for L, k, a in zip(LAYERS, ks, agreed):
          if a < k:
              for _, nm in L.names:
-@@ -1108,6 +1478,7 @@
+@@ -1129,6 +1480,7 @@
          L.k = k
      if DYNAMIC:
          _dyn_table(dev)
@@ -6811,7 +6779,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_kv_hot_lend.py b/python/sglang/srt/l
      kd = _k_dev(dev)
      kd.copy_(torch.tensor(ks, dtype=torch.int64), non_blocking=True)
      torch.cuda.synchronize(dev)
-@@ -1137,7 +1508,15 @@
+@@ -1158,7 +1510,15 @@
          # the slots leave the table; a round's copies in flight finish in the sync,
          # and what they were for is in each layer's held list for the next lend
          STATE["tbl"].fill_(-1)
