@@ -45,7 +45,7 @@ step() { printf '\n== %s\n' "$*"; }
 built_as() { [[ -f "$1" && "$(cat "$1")" == "$2" ]]; }
 patch_hash() { (cd "$here/patches" && cat "$@") | sha256sum | cut -c1-12; }
 sglang_state="$TIER $(patch_hash "${sglang_patches[@]}")"
-kt_variant="patched gguf $(patch_hash kt-kernel-tree.patch kt-kernel-llama-cpp.patch kt-kernel-load-prefetch.py gguf/kt-kernel-gguf.patch gguf/kt-llamafile-iq2xs.patch)"
+kt_variant="patched gguf $(patch_hash kt-kernel-tree.patch kt-kernel-cpu-handoff.patch kt-kernel-llama-cpp.patch kt-kernel-load-prefetch.py gguf/kt-kernel-gguf.patch gguf/kt-llamafile-iq2xs.patch)"
 # a patch is checked against the pinned tree first; nothing is applied when it does not fit
 apply_checked() {
   local tree="$1" patch="$2"
@@ -82,6 +82,8 @@ if ! built_as third_party/ktransformers/.dsv41-1017-patched "$kt_variant"; then
   git -C third_party/ktransformers submodule update --init --force --quiet third_party/llama.cpp third_party/pybind11
   git -C third_party/ktransformers/third_party/llama.cpp clean -fdq
   apply_checked third_party/ktransformers "$here/patches/kt-kernel-tree.patch"
+  # cpu-gpu-overlap (tier 1): submit_forward's packer argument
+  apply_checked third_party/ktransformers "$here/patches/kt-kernel-cpu-handoff.patch"
   apply_checked third_party/ktransformers/third_party/llama.cpp "$here/patches/kt-kernel-llama-cpp.patch"
   # the GGUF experts: kt-kernel's LLAMAFILE backend, and IQ2_XS in its x86 kernels
   apply_checked third_party/ktransformers "$here/patches/gguf/kt-kernel-gguf.patch"

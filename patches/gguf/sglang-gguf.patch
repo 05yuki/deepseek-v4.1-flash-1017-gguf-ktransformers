@@ -354,7 +354,7 @@ diff -ruN a/python/sglang/srt/layers/moe/fused_moe_triton/layer.py b/python/sgla
 diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/layers/moe/kt_ep_wrapper.py
 --- a/python/sglang/srt/layers/moe/kt_ep_wrapper.py
 +++ b/python/sglang/srt/layers/moe/kt_ep_wrapper.py
-@@ -13,7 +13,11 @@
+@@ -14,12 +14,16 @@
  
  import torch
  
@@ -362,11 +362,16 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/la
 +_CALIBRATING = os.environ.get("KT_PREFILL_LEND_CALIBRATING") == "1"
 +
  from sglang.srt.arg_groups.overrides import model_config_of
+ from sglang.srt.layers.moe.kt_handoff_pack import (
+     PACK as _KT_HANDOFF_PACK,
+     SHARED_AFTER_SUBMIT as _KT_SHARED_AFTER_SUBMIT,
+     pack_to_host,
+ )
 +from sglang.srt.layers.moe import kt_hot_cache
  from sglang.srt.layers.moe.kt_stream_prefill import stream_prefill_for
  from sglang.srt.layers.quantization.base_config import FusedMoEMethodBase
  from sglang.srt.runtime_context import (
-@@ -324,7 +328,9 @@
+@@ -330,7 +334,9 @@
              gpu_mask = torch.zeros(num_experts, dtype=torch.bool)
              # kt_kv_hot_lend's dynamic resident rows: kt-kernel loads every expert, the
              # routes say what it computes (-1 for what the GPU takes)
@@ -377,7 +382,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/la
                  gpu_mask[: self.num_gpu_experts] = True
              KT_LAYERS[self.kt_config.layer_idx] = self
              self.wrapper = KTMoEWrapper(
-@@ -393,6 +399,7 @@
+@@ -399,6 +405,7 @@
              from sglang.srt.layers.moe.kt_stream_prefill import stream_prefill_init_early
  
              stream_prefill_init_early(self, layer)
@@ -385,7 +390,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/la
  
      def create_moe_runner(
          self, layer: torch.nn.Module, moe_runner_config: "MoeRunnerConfig"
-@@ -433,7 +440,7 @@
+@@ -439,7 +446,7 @@
              "Only SiLU activation is supported."
          )
  
@@ -394,7 +399,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/la
              return
  
          x = dispatch_output.hidden_states
-@@ -462,7 +469,7 @@
+@@ -484,7 +491,7 @@
          Returns:
              CPU expert computation results
          """
@@ -403,7 +408,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/la
              return torch.zeros_like(x)
  
          # Wait for CPU computation and retrieve results
-@@ -548,6 +555,19 @@
+@@ -570,6 +577,19 @@
          # their slots, and to the CPU at weight 0
          hot = kt_kv_hot_lend.route(self, dispatch_output) if streamer is None else None
  
@@ -423,7 +428,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/la
          # Step 1: Submit CPU expert computation (non-blocking)
          if streamer is None and self.tp_rank == 0:
              self.submit(layer, hot[0] if hot is not None else dispatch_output)
-@@ -586,7 +606,10 @@
+@@ -608,7 +628,10 @@
          # experts (--kt-num-gpu-experts 0, every slot given to the streamer
          # and the KV pool) there is nothing to run and the FlashInfer MXFP4
          # runner refuses a zero-expert workspace (09-16).
@@ -435,7 +440,7 @@ diff -ruN a/python/sglang/srt/layers/moe/kt_ep_wrapper.py b/python/sglang/srt/la
              gpu_combine_input = self.gpu_method.apply(layer, masked_dispatch_output)
              output = gpu_combine_input.hidden_states
              if streamer is not None and _hot_check:
-@@ -600,7 +623,12 @@
+@@ -622,7 +645,12 @@
  
          # Step 4: Synchronize CPU results and merge with GPU results
          if streamer is not None:

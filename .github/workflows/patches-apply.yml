@@ -49,7 +49,11 @@ jobs:
           git init -q kt && cd kt
           git fetch -q --depth 1 https://github.com/kvcache-ai/ktransformers.git "$KT_COMMIT"
           git checkout -q FETCH_HEAD
-          git apply --check --whitespace=nowarn ../patches/kt-kernel-tree.patch
+          git apply --whitespace=nowarn ../patches/kt-kernel-tree.patch
+          # then the patches setup.sh applies after it, in its order
+          git apply --whitespace=nowarn ../patches/kt-kernel-cpu-handoff.patch
+          git apply --whitespace=nowarn ../patches/gguf/kt-kernel-gguf.patch
+          git apply --check --whitespace=nowarn ../patches/gguf/kt-llamafile-iq2xs.patch
           llama=$(git ls-tree HEAD third_party/llama.cpp | awk '{print $3}')
           git init -q ../llama && cd ../llama
           git fetch -q --depth 1 https://github.com/ggerganov/llama.cpp.git "$llama"

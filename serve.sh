@@ -381,6 +381,15 @@ if [[ "$gpu_experts" != "0" && "${KT_HOT_BACKEND:-marlin}" == "marlin" ]]; then
 fi
 
 # --- kt-kernel and the streamed prefill ---------------------------------------
+# cpu-gpu-overlap (tier1.md §19): the shared expert forks after the CPU request, and one kernel
+# stages the request in the pinned buffers; both on
+if has cpu-gpu-overlap; then
+  export KT_SHARED_AFTER_SUBMIT="${KT_SHARED_AFTER_SUBMIT:-1}"
+  export KT_HANDOFF_PACK="${KT_HANDOFF_PACK:-1}"
+elif [[ "${KT_SHARED_AFTER_SUBMIT:-0}" != 0 || "${KT_HANDOFF_PACK:-0}" != 0 ]]; then
+  echo "KT_SHARED_AFTER_SUBMIT/KT_HANDOFF_PACK require the cpu-gpu-overlap tier-1 feature" >&2
+  exit 3
+fi
 export KT_STREAM_MEMOPS="${KT_STREAM_MEMOPS:-1}"
 export KT_TASKQUEUE_SPIN_US="${KT_TASKQUEUE_SPIN_US:-300}"
 export KT_MXFP4_BACKEND="${KT_MXFP4_BACKEND:-avx2}"
@@ -545,7 +554,7 @@ printf '%s\n' "drive reads: $KT_GGUF_PREFETCH_THREADS cache readers and $KT_GGUF
 printf '%s\n' "expert cache: $KT_GGUF_EXPERT_CACHE_GIB GiB of nodes ${nodes[*]}'s ${node_gib} GiB for ${raw_gib} GiB of experts; IQ1_M decode copy: $KT_GGUF_CACHE_IQ1M_T (${copy_gib} GiB)"
 printf '%s\n' "patch tier $tier; context $context_length; attention output FP8 before wo_a: block ${SGLANG_DSV4_O_FP8_QDQ_BLOCK:-0}; KV layout ${SGLANG_DSV4_KV_LAYOUT:-v4}"
 (( tier >= 1 )) && printf '%s\n' "tier-1 features: $( [[ -f "$features_file" ]] && tr '\n' ' ' < "$features_file" || echo all)"
-(( tier >= 1 )) && printf '%s\n' "wo_a native FP8: $SGLANG_DSV4_WO_A_FP8_NATIVE; vision tower on demand: $SGLANG_DSV4_VISION_ON_DEMAND; MXFP4 MoE fp32: $SGLANG_MXFP4_MOE_FP32; Marlin MoE fp32 glue: $SGLANG_MARLIN_MOE_FP32_GLUE; CPU scale codes: $KT_MXFP4_SCALE_CODES; hot lend spare floor: ${KT_KV_HOT_SPARE_FLOOR_MB:-off} MiB; dynamic hot slots: ${KT_KV_HOT_DYNAMIC_SLOTS:-0}, resident rows too: ${KT_KV_HOT_DYNAMIC_RESIDENT:-0}"
+(( tier >= 1 )) && printf '%s\n' "wo_a native FP8: $SGLANG_DSV4_WO_A_FP8_NATIVE; vision tower on demand: $SGLANG_DSV4_VISION_ON_DEMAND; MXFP4 MoE fp32: $SGLANG_MXFP4_MOE_FP32; Marlin MoE fp32 glue: $SGLANG_MARLIN_MOE_FP32_GLUE; CPU scale codes: $KT_MXFP4_SCALE_CODES; hot lend spare floor: ${KT_KV_HOT_SPARE_FLOOR_MB:-off} MiB; dynamic hot slots: ${KT_KV_HOT_DYNAMIC_SLOTS:-0}, resident rows too: ${KT_KV_HOT_DYNAMIC_RESIDENT:-0}; shared expert after submit: ${KT_SHARED_AFTER_SUBMIT:-0}; packed hand-off: ${KT_HANDOFF_PACK:-0}"
 printf '%s\n' "Run directory: $run_dir"
 ln -sfn "$run_dir" "$log_root/$log_name/current"
 if [[ "$mode" == "--background" ]]; then
