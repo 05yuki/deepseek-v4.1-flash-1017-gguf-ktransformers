@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Build everything serve.sh needs for a GGUF build of DeepSeek-V4.1-Flash-1017, inside this directory:
-#   third_party/sglang         sgl-project/sglang main @ 5d8e90a0 + patches/sglang-tier0..2 + patches/gguf/sglang-gguf.patch
+#   third_party/sglang         sgl-project/sglang main @ 20036b7a + patches/sglang-tier0..2 + patches/gguf/sglang-gguf.patch
 #   third_party/ktransformers  kvcache-ai/ktransformers @ 95009ea + patches/kt-kernel-*.patch + patches/gguf/kt-*.patch
 #   .venv                      Python 3.12, requirements.txt, kt-kernel built for this CPU and GPU
 #   engram-adapter/librow_store.so, build/libkv_vmm.so, the GGUF CUDA kernels (.cache/torch_extensions)
@@ -25,7 +25,7 @@
 set -Eeuo pipefail
 here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$here"
-SGLANG_COMMIT=5d8e90a0f96e6ba35603f9b27f2f1039268c810e
+SGLANG_COMMIT=20036b7add8c573cf74364028d13a3ec18bdd3c6
 KT_COMMIT=95009ea6856c0799e517e93cb12be5e8494bc7ce
 # the GGUF patch sits on the whole of the MXFP4 recipe's SGLang changes (tiers 0 to 2, every tier-1 feature)
 TIER=2

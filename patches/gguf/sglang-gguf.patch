@@ -177,7 +177,7 @@ diff -ruN a/python/sglang/kernels/ops/gemm/bf16_fp32.py b/python/sglang/kernels/
 diff -ruN a/python/sglang/srt/layers/attention/deepseek_v4_backend.py b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
 --- a/python/sglang/srt/layers/attention/deepseek_v4_backend.py
 +++ b/python/sglang/srt/layers/attention/deepseek_v4_backend.py
-@@ -212,7 +212,8 @@
+@@ -211,7 +211,8 @@
  def _use_sm89_sparse_attention() -> bool:
      # Ada has BF16 tensor cores, but cannot run FlashMLA's SM90+ kernels.
      # Match the runtime platform exactly; native SM90/SM100/SM120 paths stay intact.
@@ -8867,7 +8867,7 @@ diff -ruN a/python/sglang/srt/layers/quantization/gguf.py b/python/sglang/srt/la
 diff -ruN a/python/sglang/srt/model_executor/model_runner.py b/python/sglang/srt/model_executor/model_runner.py
 --- a/python/sglang/srt/model_executor/model_runner.py
 +++ b/python/sglang/srt/model_executor/model_runner.py
-@@ -1895,6 +1895,9 @@
+@@ -1900,6 +1900,9 @@
              from sglang.srt.layers.moe import kt_lend
  
              kt_lend.before_forward(forward_batch)
