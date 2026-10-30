@@ -40,6 +40,11 @@ jobs:
           for f in ../patches/sglang-tier1/[0-9][0-9]-*.patch ../patches/sglang-tier2-no-p2p.patch; do
             git apply --whitespace=nowarn "$f"
           done
+          # stream-mmq's llama.cpp sources, the GGUF kernel's two headers from SGLang, then the GGUF patch
+          bash ../lib/llama-mmq.sh . ../llama-mmq-clone
+          d=python/sglang/srt/layers/moe/kt_gguf_moe_multi
+          mkdir -p $d && cp python/sglang/kernels/jit/include/sgl_kernel/quantization/gguf/{ggml-common.h,vecdotq.cuh} $d/
+          git apply --whitespace=nowarn ../patches/gguf/sglang-gguf.patch
 
       - name: SM89 dispatch contracts (CPU only)
         run: python3 tools/test_sm89_dispatch.py sglang

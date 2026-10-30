@@ -256,6 +256,6 @@ python tools/nll.py compare ref.json served.json
 ## License
 
 Apache-2.0 (see `LICENSE`), except the files `NOTICE` lists: the engram adapter (MIT, from
-0xSero's adapter), llama.cpp's MMQ and quantization code vendored by `patches/gguf/sglang-gguf.patch`
-(MIT, ggml authors), and the IQ2_XS kernel in `patches/gguf/kt-llamafile-iq2xs.patch` (MIT, from
+0xSero's adapter), llama.cpp's MMQ kernels (fetched by `lib/llama-mmq.sh`, changed by `patches/llama-mmq.patch`) and
+quantization code changed by `patches/gguf/sglang-gguf.patch` (MIT, ggml authors), and the IQ2_XS kernel in `patches/gguf/kt-llamafile-iq2xs.patch` (MIT, from
 ik_llama.cpp). The GGUF weights are ISTA-DASLab's (MIT) and the model DeepSeek's (see the model card).

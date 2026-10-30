@@ -4,7 +4,7 @@
 
 | file | applies to |
 |---|---|
-| `patches/gguf/sglang-gguf.patch` | sgl-project/sglang `20036b7a` with tiers 0 to 2 applied |
+| `patches/gguf/sglang-gguf.patch` | sgl-project/sglang `20036b7a` with tiers 0 to 2 applied, llama.cpp's MMQ sources in place (`lib/llama-mmq.sh`) and SGLang's GGUF `ggml-common.h` and `vecdotq.cuh` copied into `kt_gguf_moe_multi/` |
 | `patches/gguf/kt-kernel-gguf.patch` | kvcache-ai/ktransformers `95009ea` with `kt-kernel-tree.patch` applied |
 | `patches/gguf/kt-llamafile-iq2xs.patch` | the same tree's `third_party/llamafile` |
 

@@ -44,7 +44,7 @@ step() { printf '\n== %s\n' "$*"; }
 # changed patch is applied (and kt-kernel rebuilt) again
 built_as() { [[ -f "$1" && "$(cat "$1")" == "$2" ]]; }
 patch_hash() { (cd "$here/patches" && cat "$@") | sha256sum | cut -c1-12; }
-sglang_state="$TIER $(patch_hash "${sglang_patches[@]}")"
+sglang_state="$TIER $(patch_hash "${sglang_patches[@]}" llama-mmq.patch llama-mmq.sha256)"
 kt_variant="patched gguf $(patch_hash kt-kernel-tree.patch kt-kernel-cpu-handoff.patch kt-kernel-llama-cpp.patch kt-kernel-load-prefetch.py gguf/kt-kernel-gguf.patch gguf/kt-llamafile-iq2xs.patch)"
 # a patch is checked against the pinned tree first; nothing is applied when it does not fit
 apply_checked() {
@@ -66,6 +66,14 @@ if ! built_as third_party/sglang/.dsv41-1017-patched "$sglang_state"; then
   git -C third_party/sglang checkout --quiet --force "$SGLANG_COMMIT"
   git -C third_party/sglang clean -fdq
   for p in "${sglang_patches[@]}"; do
+    if [[ "$p" == gguf/sglang-gguf.patch ]]; then
+      # stream-mmq's llama.cpp sources (fetched, patched and checked: lib/llama-mmq.sh), and the GGUF kernel's two
+      # ggml headers from SGLang's own GGUF kernels, which the GGUF patch then changes
+      bash "$here/lib/llama-mmq.sh" third_party/sglang
+      mkdir -p third_party/sglang/python/sglang/srt/layers/moe/kt_gguf_moe_multi
+      cp third_party/sglang/python/sglang/kernels/jit/include/sgl_kernel/quantization/gguf/{ggml-common.h,vecdotq.cuh} \
+        third_party/sglang/python/sglang/srt/layers/moe/kt_gguf_moe_multi/
+    fi
     apply_checked third_party/sglang "$here/patches/$p"
   done
   echo "$sglang_state" > third_party/sglang/.dsv41-1017-patched

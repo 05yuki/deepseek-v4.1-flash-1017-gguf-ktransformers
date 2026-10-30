@@ -9,10 +9,13 @@ https://github.com/0xSero/deepseek-v4.1-flash-4x-rtx-pro-6000
 (Copyright (c) 2026 0xSero, MIT License); the MIT terms apply to those files, as
 their headers say.
 
-patches/gguf/sglang-gguf.patch adds files copied or derived from llama.cpp
-(https://github.com/ggml-org/llama.cpp, commit 23b0202, Copyright (c) 2023-2026 The
-ggml authors, MIT License): kt_gguf_moe_mmq/llama_mmq/ (the patch carries its LICENSE)
-and kt_gguf_moe_multi/ggml-common.h and vecdotq.cuh. The MIT terms apply to those files.
+patches/llama-mmq.patch changes files of llama.cpp (https://github.com/ggml-org/llama.cpp,
+commit 23b0202, Copyright (c) 2023-2026 The ggml authors, MIT License) that lib/llama-mmq.sh
+fetches into kt_gguf_moe_mmq/llama_mmq/ggml/ with llama.cpp's LICENSE, and
+patches/sglang-tier1/18-stream-mmq.patch adds code derived from it
+(kt_gguf_moe_mmq/llama_mmq/). patches/gguf/sglang-gguf.patch changes
+kt_gguf_moe_multi/ggml-common.h and vecdotq.cuh, copied from SGLang's GGUF kernels, which are
+derived from llama.cpp. The MIT terms apply to those files.
 
 patches/gguf/kt-llamafile-iq2xs.patch adds an IQ2_XS dequantizer taken from
 ik_llama.cpp (https://github.com/ikawrakow/ik_llama.cpp, iqk_gemm_iquants.cpp,
@@ -20,7 +23,7 @@ Copyright (c) 2023-2024 The ggml authors, Copyright (c) 2023-2024 The llama.cpp
 authors, Copyright (c) 2024-2025 The ik_llama.cpp authors, MIT License); the MIT
 terms apply to that code.
 
-The patches under patches/ modify sgl-project/sglang (commit 66f79f1a) and
+The patches under patches/ modify sgl-project/sglang (commit 20036b7a) and
 kvcache-ai/ktransformers (kt-kernel, commit 95009ea), both Apache-2.0.
 
 The GGUF weights this setup runs are ISTA-DASLab's
