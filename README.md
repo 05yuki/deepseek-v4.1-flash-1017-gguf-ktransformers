@@ -58,8 +58,9 @@ The server speaks SGLang's OpenAI-compatible API on `127.0.0.1:8080`, one reques
 
 - **GPU: one, 16 GB, SM120 (RTX 50) as tested; an 8 GB RTX 20 (SM75) runs it too**
   ([below](#an-rtx-2070-8-gb-and-a-6-core-desktop-cpu)). The dense layers in their GGUF types take
-  6.8 GB; the rest is the KV pool (131,072 tokens by default, 32,768 on a card under 12 GB;
-  `SGLANG_CONTEXT_LENGTH`) and working room that the prefill chunk and the extra hot experts take. With several GPUs
+  6.8 GB; the rest is the KV pool (the model's 1,048,576 tokens when the socket's RAM holds every
+  expert, 131,072 when it does not, 32,768 on a card under 12 GB; `SGLANG_CONTEXT_LENGTH`) and
+  working room that the prefill chunk and the extra hot experts take. With several GPUs
   visible, `serve.sh` uses them all ([below](#two-gpus-and-two-sockets)).
   `CUDA_VISIBLE_DEVICES` or `KT_GGUF_TP` picks fewer.
 - **CPU and RAM: the socket the GPU hangs off** (with several GPUs, each GPU's socket).
@@ -122,6 +123,10 @@ overridden by the variable named next to it. Logs go to `logs/<GGUF dir name>/<t
   streams the experts' GGUF rows from the drive to the GPU
 - the threads that read the drive run away from the ones computing the experts, sized from a
   measurement of the drive that `setup.sh` takes ([docs/gguf.md](docs/gguf.md#drive-reads))
+- the context: the model's 1,048,576 tokens on one GPU when the socket's RAM holds every expert,
+  with the RoPE tables' rows past 131,072 (and any compressed KV past the GPU's share) in host
+  memory, about 1.5 GiB at 1M; 131,072 tokens otherwise, so a smaller socket keeps that memory
+  for the expert cache
 - V4.1's tool-call and reasoning parsers, as in the MXFP4 recipe
 
 ## Results
@@ -129,7 +134,8 @@ overridden by the variable named next to it. Logs go to `logs/<GGUF dir name>/<t
 AMD EPYC 7452 (Zen 2, AVX2, one of two sockets: 32 cores, 256 GB DDR4), one RTX 5070 Ti 16 GB.
 The IQ2_XXS build sits on one NVMe drive.
 The server is built from this repository and run with the `serve.sh` defaults on one GPU
-(`CUDA_VISIBLE_DEVICES=0`; 131,072-token context, one request at a time).
+(`CUDA_VISIBLE_DEVICES=0`, one request at a time): a 1,048,576-token context on the whole socket,
+131,072 tokens under the 64 GB and 128 GB limits.
 `tools/bench.py` measures it.
 Every column comes from one launch, after one warm-up pass of the same prompts.
 The first pass fills the expert cache from the drive.
@@ -162,13 +168,20 @@ Prefill, one prompt of random token ids:
 | prompt (tokens) | 64 GB | 128 GB | 251 GiB |
 |---|---|---|---|
 | 35,000 | 1,268 tok/s (28 s) | 1,855 tok/s (19 s) | 2,010 tok/s (17 s) |
+| 131,072 | | | 1,706 tok/s (77 s) |
+| 1,000,000 | | | 1,022 tok/s (16 min) |
+
+The 131,072 and 1,000,000-token rows come from another launch, with the 1,048,576-token context.
+The rows above them were measured at 131,072 tokens.
+The longer context leaves decode and the 35,000-token prefill where they were.
 
 The misses go to the drive.
 At 128 GB one expert read in fifty-five misses, and the decode is already 1.3 to 1.6 times the 64 GB one.
 The rest of the way comes with the last 11% of the experts and the IQ1_M decode copy.
 
-Outside prefill the hot lend holds 19 to 21 more experts a layer on the GPU.
-With all experts in RAM that was 799 to 827 slots, in the 6.6 to 6.7 GiB the driver had free.
+Outside prefill the hot lend holds 17 to 19 more experts a layer on the GPU.
+With all experts in RAM and the 1M context that was 708 to 752 slots.
+They sit in the KV pool's 0.78 GiB of free pages and the 5.1 to 5.4 GiB the driver had free.
 The slots are swapped for the experts the text routes to.
 Japanese prose runs fastest: its routes gather on fewer experts, so the slots and the cache take
 more of them.
@@ -252,6 +265,9 @@ python tools/nll.py compare ref.json served.json
 - The IQ1_M and IQ2_XS builds of the pack: their types are all supported, but only IQ2_XXS was
   measured.
 - CPUs other than Zen 2 and Coffee Lake (i5-9600K).
+- The 1M context on two GPUs: `serve.sh` keeps 131,072 tokens there; one GPU was measured at 1M.
+- A prompt a few dozen tokens short of a 131,072-token context (131,000 token ids) stalled the
+  server instead of being refused.
 
 ## License
 

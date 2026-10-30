@@ -62,7 +62,6 @@ export KT_LOAD_PREFETCH="${KT_LOAD_PREFETCH:-0}"
 # the prefill lend keeps a copy of the dense weights it lends: read back from the GGUF instead
 export KT_PREFILL_LEND_MIRROR="${KT_PREFILL_LEND_MIRROR:-gguf}"
 export DSV41_LEND_MAX_CHUNK="${DSV41_LEND_MAX_CHUNK:-16384}"
-export SGLANG_DSV41_HOST_KV="${SGLANG_DSV41_HOST_KV:-0}"
 export DSV41_CACHE_GIB="${DSV41_CACHE_GIB:-2}"
 # glibc hands large frees back to the node instead of keeping them in the arenas
 export MALLOC_MMAP_THRESHOLD_="${MALLOC_MMAP_THRESHOLD_:-1048576}" MALLOC_TRIM_THRESHOLD_="${MALLOC_TRIM_THRESHOLD_:-4194304}"
@@ -155,14 +154,12 @@ if any_cap 7.5; then
   # launch on larger chunks there (CUDA_ERROR_INVALID_VALUE at 8192), and the CPU sets the pace
   export SGLANG_CHUNKED_PREFILL_SIZE="${SGLANG_CHUNKED_PREFILL_SIZE:-2048}"
 fi
-# 131,072 tokens; a card under 12 GB (an 8 GB RTX 20) keeps 32,768, its room after the weights
-# (the smallest card: every rank holds the same share of the KV pool)
+# 131,072 tokens (1,048,576 when the RAM holds every expert: below); a card under 12 GB (an 8 GB
+# RTX 20) keeps 32,768, its room after the weights (the smallest card: every rank holds the same
+# share of the KV pool)
 vram_mib="$(printf '%s\n' "${vrams[@]}" | sort -n | head -1)"
-if [[ "$vram_mib" =~ ^[0-9]+$ ]] && (( vram_mib < 12288 )); then
-  export SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-32768}"
-else
-  export SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-131072}"
-fi
+context_vram=131072
+[[ "$vram_mib" =~ ^[0-9]+$ ]] && (( vram_mib < 12288 )) && context_vram=32768
 n_nodes="$(ls -d /sys/devices/system/node/node[0-9]* 2>/dev/null | wc -l)"
 (( n_nodes > 0 )) || n_nodes=1
 phys_cores="$(lscpu -p=CORE,SOCKET 2>/dev/null | grep -v '^#' | sort -u | wc -l)"
@@ -213,6 +210,15 @@ want_gib=$(( raw_gib + 4 + (KT_GGUF_CACHE_IQ1M_T == 1 ? copy_gib : 0) ))
 cache_gib=$(( want_gib < budget_gib ? want_gib : budget_gib ))
 export KT_GGUF_EXPERT_CACHE_GIB="${KT_GGUF_EXPERT_CACHE_GIB:-$cache_gib}"
 (( KT_GGUF_EXPERT_CACHE_GIB >= 8 )) || { echo "nodes ${nodes[*]} have ${node_gib} GiB: too little for the expert cache (KT_GGUF_EXPERT_CACHE_GIB)" >&2; exit 5; }
+# the context: the model's 1,048,576 tokens on one GPU of 12 GB or more when the node holds every
+# expert with 2 GiB to spare, the compressed KV past the GPU's share and the RoPE rows past
+# 131,072 in host memory (host-kv; about 1.5 GiB at 1M); otherwise context_vram above, all on the
+# GPU, so a node that cannot hold the experts keeps every GiB for the expert cache
+if (( tp == 1 && context_vram == 131072 && budget_gib >= raw_gib + 4 + 2 )); then
+  export SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-1048576}" SGLANG_DSV41_HOST_KV="${SGLANG_DSV41_HOST_KV:-1}"
+else
+  export SGLANG_CONTEXT_LENGTH="${SGLANG_CONTEXT_LENGTH:-$context_vram}" SGLANG_DSV41_HOST_KV="${SGLANG_DSV41_HOST_KV:-0}"
+fi
 if (( tp > 1 )); then
   # the shared expert whole on every rank: its down projection's 2304 inputs split in two are
   # 1152, not a whole number of 256-value GGUF blocks (+0.5 GB a GPU)

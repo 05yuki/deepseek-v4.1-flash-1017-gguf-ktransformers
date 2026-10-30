@@ -41,7 +41,10 @@ The pack comes in two layouts, and both load.
   copy); the rows a batch looks up are opened in float32 in gguf-py's order of operations, so the
   embeddings are the same values the bf16 copy held.
 - **RoPE tables**: built for the served context (`SGLANG_CONTEXT_LENGTH`) instead of the model's
-  1,048,576 positions (two tables of 512 MiB each at 1M; their rows depend only on the position).
+  1,048,576 positions, one copy for all the layers (two tables of 512 MiB each at 1M; their rows
+  depend only on the position). Past `KT_ROPE_DEVICE_ROWS` (131,072) rows a table goes on in host
+  memory of the GPU's NUMA node, in the same address range (the kv-vmm split range host-kv uses):
+  at 1M that keeps 0.75 GB on the GPU for the lends, and the rows past 131,072 are read over PCIe.
 - **Routed experts**: kt-kernel's LLAMAFILE backend computes them from the GGUF's rows
   (`--kt-method LLAMAFILE`, `KT_GGUF_ZEROCOPY=1`, on): no arena copy of the experts at load.
 - **Engram**: the two tables are read row by row from the Engram GGUF (IQ4_NL, 144 bytes a row)
